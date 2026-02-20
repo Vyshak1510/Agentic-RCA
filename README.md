@@ -1,47 +1,47 @@
-# RCA Agent Platform
+# Agentic RCA Platform
 
 Cloud-agnostic, Kubernetes-first, Apache-2.0 open-source platform for alert-driven root-cause analysis (RCA).
 
-## v1 Product Boundaries
+## Product Boundaries (v1)
 
-- RCA-only output (top-3 hypotheses + evidence + confidence)
-- No autonomous remediation
-- Read-only investigations against observability/platform connectors
-- Slack + Jira publishing supported
-- Formal rollout gates enforced by eval subsystem
+- RCA-only output (top-3 hypotheses + evidence + confidence), no autonomous remediation.
+- Read-only investigations across connectors.
+- Slack + Jira publishing supported.
+- Compare-first rollout for agentic stages (`compare` -> `active`).
+- Formal eval gating and human-adjudication support.
 
-## Success Criteria
+## What Is Implemented
 
-- p95 first RCA latency under 10 minutes
-- Top-3 hit rate >= 65%
-- Top-1 hit rate >= 35%
-- Unsupported-claim rate < 5%
-- Shadow mode before assisted mode
-- 100% human review for first 2 weeks
+- Temporal-orchestrated investigation workflow with six stages:
+  1. `resolve_service_identity`
+  2. `build_investigation_plan`
+  3. `collect_evidence`
+  4. `synthesize_rca_report`
+  5. `publish_report`
+  6. `emit_eval_event`
+- Agentic resolver/planner runtime with:
+  - model routing (primary/fallback),
+  - tool-calling loop with limits,
+  - Pydantic output validation,
+  - compare-mode diff capture,
+  - strict fail behavior in active mode.
+- Tool registry across built-in connector tools + MCP-discovered tools.
+- Settings APIs for MCP servers, prompt profiles, and rollout mode.
+- Web UI console (`services/web-ui`) with:
+  - past/ongoing incident views,
+  - workflow run timeline/inspector,
+  - interactive mapper (drag/pan/zoom/minimap/reset),
+  - mapper layout persistence per tenant+user+workflow key,
+  - settings pages for connectors, LLM routes, MCP, prompts, rollout.
 
-## Tech Defaults
+## Tech Stack
 
 - Runtime: Python
-- Deployment: Kubernetes only
 - Orchestration: Temporal
-- Data: PostgreSQL + Redis
-- Artifacts: S3-compatible object store (MinIO default)
-- Auth: API key default, optional OIDC
+- UI: Next.js + TypeScript + React Flow
+- Data defaults: PostgreSQL + Redis (platform target), in-memory store for local dev
+- Deployment: Kubernetes (Helm + CRDs)
 - License: Apache-2.0
-
-## Architecture
-
-Core services:
-
-- `ingest-api`: source-agnostic alert ingestion and normalization
-- `orchestrator-worker`: Temporal workflows and bounded investigation plans
-- `resolver-service`: canonical service/API/env identity resolution
-- `connector-runtime`: read-only connector execution
-- `evidence-store`: citation-backed normalized evidence storage
-- `analysis-engine`: LLM synthesis with primary/fallback routing
-- `publisher`: Slack/Jira publication
-- `eval-service`: replay runs, online scoring, rollout gates
-- `policy-service`: read-only and data egress/redaction policy checks
 
 ## Repository Layout
 
@@ -50,6 +50,7 @@ Core services:
 - `services/analysis-engine`
 - `services/eval-service`
 - `services/web-ui`
+- `platform_core`
 - `connectors/core/newrelic`
 - `connectors/core/azure`
 - `connectors/core/otel`
@@ -59,31 +60,144 @@ Core services:
 - `evals/golden-datasets/`
 - `examples/`
 
-## APIs
+## Local Development
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- Docker (for Temporal local)
+
+### 1) Install dependencies
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+make setup
+make web-install
+```
+
+### 2) Start Temporal
+
+```bash
+docker compose -f infra/temporal/docker-compose.yml up -d
+```
+
+### 3) Run services (3 terminals)
+
+Terminal A:
+
+```bash
+.venv/bin/python -m uvicorn services.ingest-api.app.main:app --host 0.0.0.0 --port 8000
+```
+
+Terminal B:
+
+```bash
+.venv/bin/python -m services.orchestrator.app.worker
+```
+
+Terminal C:
+
+```bash
+cd services/web-ui
+npm run dev -- --port 3001
+```
+
+### 4) Open local UIs
+
+- Web UI: `http://localhost:3001`
+- Temporal UI: `http://localhost:8080`
+- Ingest health: `http://localhost:8000/v1/health`
+
+### 5) Seed demo incidents
+
+```bash
+TS=$(date -u +"%Y%m%dT%H%M%SZ")
+curl -sS -X POST http://localhost:8000/v1/alerts \
+  -H 'content-type: application/json' \
+  --data "{
+    \"source\":\"newrelic\",
+    \"severity\":\"critical\",
+    \"incident_key\":\"demo-checkout-$TS\",
+    \"entity_ids\":[\"service-checkout\"],
+    \"timestamps\":{\"triggered_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"},
+    \"raw_payload_ref\":\"newrelic://demo-checkout-$TS\",
+    \"raw_payload\":{\"condition\":\"error_rate_spike\"}
+  }"
+```
+
+Tip: stop the worker temporarily before posting alerts if you want incidents to remain in `running` state for the Ongoing view demo.
+
+## API Surface (Current)
+
+### Core Investigation APIs
 
 - `POST /v1/alerts`
 - `POST /v1/alerts/newrelic`
 - `GET /v1/investigations`
 - `GET /v1/investigations/{id}`
-- `GET /v1/investigations/{id}/events`
+- `GET /v1/investigations/{id}/events` (SSE)
 - `POST /v1/investigations/{id}/runs`
 - `GET /v1/investigations/{id}/runs`
 - `GET /v1/investigations/{id}/runs/{run_id}`
-- `GET /v1/investigations/{id}/runs/{run_id}/events`
+- `GET /v1/investigations/{id}/runs/{run_id}/events` (SSE)
 - `POST /v1/investigations/{id}/rerun`
-- `POST /v1/internal/runs/events`
-- `POST /v1/catalog/mappings/upsert`
-- `POST /v1/providers/llm`
+- `POST /v1/internal/runs/events` (internal callback)
+
+### Settings APIs
+
 - `GET /v1/settings/connectors`
 - `PUT /v1/settings/connectors/{provider}`
 - `POST /v1/settings/connectors/{provider}/test`
 - `GET /v1/settings/llm-routes`
 - `PUT /v1/settings/llm-routes`
-- `POST /v1/evals/runs`
-- `GET /v1/evals/runs/{id}`
-- `POST /v1/evals/adjudications`
+- `GET /v1/settings/mcp-servers`
+- `PUT /v1/settings/mcp-servers/{server_id}`
+- `POST /v1/settings/mcp-servers/{server_id}/test`
+- `GET /v1/settings/mcp-servers/{server_id}/tools`
+- `GET /v1/settings/agent-prompts`
+- `PUT /v1/settings/agent-prompts/{stage_id}`
+- `GET /v1/settings/agent-rollout`
+- `PUT /v1/settings/agent-rollout`
+
+### UI Layout APIs
+
+- `GET /v1/ui/workflow-layouts/{workflow_key}`
+- `PUT /v1/ui/workflow-layouts/{workflow_key}`
+
+### Ops APIs
+
+- `GET /v1/me`
 - `GET /v1/metrics`
 - `GET /v1/health`
+
+## Environment Variables
+
+Backend:
+
+- `TEMPORAL_AUTOSTART_ENABLED` (default `true`)
+- `TEMPORAL_ADDRESS` (default `localhost:7233`)
+- `TEMPORAL_TASK_QUEUE` (default `rca-investigations`)
+- `ORCHESTRATOR_EVENT_BASE_URL` (default `http://localhost:8000`)
+- `ORCHESTRATOR_EVENT_TOKEN` (optional)
+- `API_KEY` (optional; if set, required by API)
+- `CORS_ALLOW_ORIGINS` (default `http://localhost:3000`; set to include `http://localhost:3001` for local web UI)
+
+Web UI:
+
+- `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`)
+- `NEXT_PUBLIC_API_KEY` (optional)
+- `NEXT_PUBLIC_DEFAULT_TENANT` (default `default`)
+- `NEXT_PUBLIC_DEFAULT_ROLE` (default `admin`)
+- `NEXT_PUBLIC_DEFAULT_USER` (default `web-ui`)
+
+## Testing
+
+```bash
+PYTHONPATH=. .venv/bin/pytest -q
+cd services/web-ui && npm run build
+```
 
 ## Kubernetes Assets
 
@@ -95,84 +209,8 @@ Core services:
   - `CatalogSource`
   - `EvalPolicy`
 
-## Local Quick Start
+## Documentation
 
-```bash
-make setup
-make test
-```
-
-## Temporal Local Demo
-
-1. Start Temporal:
-
-```bash
-docker compose -f infra/temporal/docker-compose.yml up -d
-```
-
-2. Run one end-to-end workflow execution (worker + trigger in one process):
-
-```bash
-make run-orchestrator-demo
-```
-
-The workflow executes these v1 RCA stages:
-
-1. Resolve canonical service identity
-2. Build and validate bounded investigation plan
-3. Collect connector evidence with early-stop logic
-4. Synthesize citation-backed top-3 hypotheses (primary/fallback LLM routing)
-5. Publish Slack/Jira summary (optional)
-6. Emit eval/adjudication event metadata
-
-If your local Python env does not have `temporalio`, run the same demo in a disposable container:
-
-```bash
-docker run --rm --network temporal_default \
-  -e TEMPORAL_ADDRESS=temporal:7233 \
-  -e PYTHONPATH=/app \
-  -v "$PWD":/app -w /app \
-  python:3.11-slim sh -lc "pip install --no-cache-dir temporalio pydantic >/dev/null && python services/orchestrator/app/run_demo.py"
-```
-
-## Delivery Status
-
-This repository currently contains a production-oriented baseline scaffold for v1, including:
-
-- Service contracts and API skeletons
-- Connector SDK interfaces and contract tests
-- CRDs + Helm packaging baseline
-- Evaluation contracts, sample golden dataset, and CI gate workflow
-
-## Web UI (Starter)
-
-- Location: `services/web-ui`
-- Stack: Next.js + TypeScript + Tailwind
-- Interactive workflow mapper + run inspector (GitHub Actions style)
-- Routes:
-  - `/incidents/past`
-  - `/incidents/ongoing`
-  - `/incidents/{id}`
-  - `/settings`
-
-Run locally:
-
-```bash
-make web-install
-make web-dev
-```
-
-Environment variables:
-
-- `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`)
-- `NEXT_PUBLIC_API_KEY` (optional)
-- `NEXT_PUBLIC_DEFAULT_TENANT` (default `default`)
-- `NEXT_PUBLIC_DEFAULT_ROLE` (default `admin`)
-
-Backend run-orchestration environment variables:
-
-- `TEMPORAL_AUTOSTART_ENABLED` (default `true`)
-- `TEMPORAL_ADDRESS` (default `localhost:7233`)
-- `TEMPORAL_TASK_QUEUE` (default `rca-investigations`)
-- `ORCHESTRATOR_EVENT_BASE_URL` (default `http://localhost:8000`)
-- `ORCHESTRATOR_EVENT_TOKEN` (optional shared secret for internal run-event callbacks)
+- API summary: `docs/api.md`
+- Architecture: `docs/architecture.md`
+- OpenAPI: `docs/openapi.yaml`
