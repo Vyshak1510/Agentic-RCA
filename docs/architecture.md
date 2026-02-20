@@ -8,13 +8,34 @@
 ## Data Plane
 
 1. `ingest-api` validates inbound alerts and normalizes to `AlertEnvelope`.
-2. Resolver chain maps provider entities to canonical service identity.
-3. Planner creates bounded `InvestigationPlan` from alert class templates.
+2. Resolver stage supports compare/active rollout:
+   - Compare mode: deterministic resolver remains active while agentic resolver runs in parallel and records diffs.
+   - Active mode: agentic resolver output is source of truth; stage failure fails run.
+3. Planner stage supports compare/active rollout:
+   - Compare mode: deterministic planner remains active while agentic planner runs in parallel and records diffs.
+   - Active mode: agentic planner output is source of truth; stage failure fails run.
 4. Connector runtime executes read-only calls through core adapters or plugins.
 5. Evidence pipeline redacts + normalizes to citation-backed `EvidenceItem`.
 6. Analysis engine synthesizes top hypotheses with citation enforcement.
 7. Publisher posts outputs to Slack/Jira.
 8. Eval subsystem scores runs and enforces rollout gates.
+
+## Agentic Runtime
+
+- Model routing uses tenant/environment LLM route settings (`primary_model` + `fallback_model`).
+- Stage prompts are configurable per stage (`resolve_service_identity`, `build_investigation_plan`).
+- Tool registry merges:
+  - Built-in connector tools
+  - MCP-discovered tools
+- Planning stage uses light probes only (no deep evidence reads).
+- Tool-call traces are stored as sanitized summaries (no secret values).
+
+## MCP and Control Surfaces
+
+- MCP servers are managed via settings API and can be connection-tested.
+- MCP tool catalogs are fetched and cached per tenant/environment/server.
+- Agent rollout mode is configurable (`compare`, `active`).
+- Web mapper layout state is persisted per tenant+user+workflow key.
 
 ## Resolver Chain
 

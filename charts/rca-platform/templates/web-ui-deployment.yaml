@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-web-ui
+spec:
+  replicas: {{ .Values.webUi.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "rca-platform.fullname" . }}-web-ui
+  template:
+    metadata:
+      labels:
+        app: {{ include "rca-platform.fullname" . }}-web-ui
+    spec:
+      containers:
+        - name: web-ui
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: {{ .Values.webUi.apiBaseUrl | quote }}
+          command: ["npm", "run", "start", "--prefix", "services/web-ui"]
+          ports:
+            - containerPort: {{ .Values.webUi.port }}
