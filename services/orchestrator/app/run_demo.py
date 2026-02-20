@@ -14,6 +14,7 @@ from services.orchestrator.app.activities import (
     collect_evidence_activity,
     emit_eval_event_activity,
     publish_activity,
+    report_workflow_terminal_activity,
     resolve_service_activity,
     synthesize_report_activity,
 )
@@ -24,11 +25,18 @@ async def run_demo() -> None:
     temporal_address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
     task_queue = os.getenv("TEMPORAL_TASK_QUEUE", "rca-investigations")
     publish_outputs = os.getenv("DEMO_PUBLISH_OUTPUTS", "false").lower() in {"1", "true", "yes"}
+    callback_base = os.getenv("ORCHESTRATOR_EVENT_BASE_URL", "").strip()
+    callback_url = os.getenv("ORCHESTRATOR_EVENT_URL")
+    if not callback_url and callback_base:
+        callback_url = f"{callback_base.rstrip('/')}/v1/internal/runs/events"
 
     investigation_id = f"inv-{uuid4()}"
+    run_id = f"run-{uuid4()}"
     workflow_id = f"rca-demo-{uuid4()}"
     wf_input = InvestigationWorkflowInput(
         investigation_id=investigation_id,
+        run_id=run_id,
+        workflow_id=workflow_id,
         alert={
             "source": "newrelic",
             "severity": "critical",
@@ -39,6 +47,8 @@ async def run_demo() -> None:
             "raw_payload": {"condition": "error_rate_spike"},
         },
         publish_outputs=publish_outputs,
+        event_callback_url=callback_url,
+        event_callback_token=os.getenv("ORCHESTRATOR_EVENT_TOKEN"),
     )
 
     client = await Client.connect(temporal_address)
@@ -53,6 +63,7 @@ async def run_demo() -> None:
             synthesize_report_activity,
             publish_activity,
             emit_eval_event_activity,
+            report_workflow_terminal_activity,
         ],
     ):
         result = await client.execute_workflow(
@@ -68,6 +79,7 @@ async def run_demo() -> None:
             {
                 "workflow_id": workflow_id,
                 "investigation_id": investigation_id,
+                "run_id": run_id,
                 "task_queue": task_queue,
                 "result": result,
             },

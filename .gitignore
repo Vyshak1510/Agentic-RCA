@@ -24,3 +24,9 @@ dist/
 *.log
 coverage.xml
 htmlcov/
+
+# Node
+node_modules/
+.next/
+.next_stale_*/
+out/

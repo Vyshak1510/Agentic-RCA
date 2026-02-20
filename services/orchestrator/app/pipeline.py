@@ -8,18 +8,33 @@ from typing import Any
 from connectors.core.azure.plugin import AzureConnector
 from connectors.core.newrelic.plugin import NewRelicConnector
 from connectors.core.otel.plugin import OTelConnector
+from platform_core.agent_runtime import run_planner_agent, run_resolver_agent
 from platform_core.connector_runtime import ConnectorRuntime
 from platform_core.evidence_store import EvidenceStore
 from platform_core.llm_router import ModelRoute, synthesize_with_fallback
-from platform_core.models import AlertEnvelope, EvidenceItem, Hypothesis, InvestigationPlan, RcaReport, ServiceIdentity
+from platform_core.models import (
+    AgentPromptProfile,
+    AgentRolloutMode,
+    AlertEnvelope,
+    EvidenceItem,
+    Hypothesis,
+    InvestigationPlan,
+    LlmProviderRoute,
+    McpServerConfig,
+    McpToolDescriptor,
+    RcaReport,
+    ServiceIdentity,
+    WorkflowStageId,
+)
 from platform_core.planner import build_default_plan
 from platform_core.policy import enforce_budget_policy, enforce_citation_policy
 from platform_core.policy_service import PolicyService
 from platform_core.publisher import Publisher
 from platform_core.resolver import resolve_service_identity
+from platform_core.store import store
 
 
-def resolve_service_stage(alert_payload: dict[str, Any]) -> dict[str, Any]:
+def _deterministic_service_identity(alert_payload: dict[str, Any]) -> dict[str, Any]:
     alert = AlertEnvelope.model_validate(alert_payload)
     entities = list(dict.fromkeys(alert.entity_ids))
     nr_candidates = entities if alert.source == "newrelic" else []
@@ -34,14 +49,232 @@ def resolve_service_stage(alert_payload: dict[str, Any]) -> dict[str, Any]:
         cmdb_candidates=cmdb_candidates,
         rag_candidates=rag_candidates,
     )
-    return identity.model_dump(mode="json")
+    payload = identity.model_dump(mode="json")
+    payload["stage_reasoning_summary"] = (
+        "Deterministic resolver chain applied in order: newrelic -> azure -> cmdb -> rag."
+    )
+    payload["tool_traces"] = []
+    return payload
 
 
-def build_plan_stage(investigation_id: str, alert_payload: dict[str, Any]) -> dict[str, Any]:
+def _deterministic_plan(investigation_id: str, alert_payload: dict[str, Any]) -> dict[str, Any]:
     alert = AlertEnvelope.model_validate(alert_payload)
     plan = build_default_plan(investigation_id=investigation_id, alert=alert)
     enforce_budget_policy(plan)
-    return plan.model_dump(mode="json")
+    payload = plan.model_dump(mode="json")
+    payload["stage_reasoning_summary"] = "Deterministic planner applied source templates and budget constraints."
+    payload["tool_traces"] = []
+    return payload
+
+
+def _tenant_and_environment(run_context: dict[str, Any] | None) -> tuple[str, str]:
+    if not run_context:
+        return "default", "prod"
+    tenant = str(run_context.get("tenant") or "default")
+    environment = str(run_context.get("environment") or "prod")
+    return tenant, environment
+
+
+def _llm_route(run_context: dict[str, Any] | None, tenant: str, environment: str) -> LlmProviderRoute:
+    if run_context and isinstance(run_context.get("llm_route"), dict):
+        route_payload = run_context["llm_route"]
+        return LlmProviderRoute.model_validate(route_payload)
+    return store.get_llm_route(tenant, environment)
+
+
+def _prompt_profile(
+    run_context: dict[str, Any] | None,
+    tenant: str,
+    environment: str,
+    stage_id: WorkflowStageId,
+) -> AgentPromptProfile:
+    if run_context and isinstance(run_context.get("agent_prompt_profiles"), dict):
+        profiles_payload = run_context["agent_prompt_profiles"]
+        if isinstance(profiles_payload.get(stage_id.value), dict):
+            return AgentPromptProfile.model_validate(profiles_payload[stage_id.value])
+
+    existing = store.get_agent_prompt_profile(tenant, environment, stage_id)
+    if existing:
+        return existing
+    return AgentPromptProfile(
+        tenant=tenant,
+        environment=environment,
+        stage_id=stage_id,
+        system_prompt="You are an RCA investigation agent.",
+        objective_template="Resolve alert {{incident_key}} with evidence-linked reasoning.",
+        max_turns=4,
+        max_tool_calls=6,
+        tool_allowlist=[],
+        updated_at=datetime.now(timezone.utc),
+        updated_by="system",
+    )
+
+
+def _rollout_mode(run_context: dict[str, Any] | None, tenant: str, environment: str) -> AgentRolloutMode:
+    if run_context and run_context.get("agent_rollout_mode"):
+        return AgentRolloutMode(str(run_context["agent_rollout_mode"]))
+    return store.get_agent_rollout(tenant, environment).mode
+
+
+def _mcp_servers(run_context: dict[str, Any] | None, tenant: str, environment: str) -> list[McpServerConfig]:
+    if run_context and isinstance(run_context.get("mcp_servers"), list):
+        return [McpServerConfig.model_validate(item) for item in run_context["mcp_servers"]]
+    return store.list_mcp_servers(tenant=tenant, environment=environment)
+
+
+def _mcp_tools(run_context: dict[str, Any] | None, tenant: str, environment: str) -> list[McpToolDescriptor]:
+    if run_context and isinstance(run_context.get("mcp_tools"), list):
+        return [McpToolDescriptor.model_validate(item) for item in run_context["mcp_tools"]]
+    return store.list_all_mcp_tools(tenant=tenant, environment=environment)
+
+
+def _service_identity_diff(deterministic: dict[str, Any], agentic: dict[str, Any]) -> dict[str, Any]:
+    deterministic_ambiguous = deterministic.get("ambiguous_candidates") or []
+    agent_ambiguous = agentic.get("ambiguous_candidates") or []
+    return {
+        "canonical_service_id_changed": deterministic.get("canonical_service_id") != agentic.get("canonical_service_id"),
+        "deterministic_canonical_service_id": deterministic.get("canonical_service_id"),
+        "agent_canonical_service_id": agentic.get("canonical_service_id"),
+        "ambiguity_changed": deterministic_ambiguous != agent_ambiguous,
+        "deterministic_ambiguous_candidates": deterministic_ambiguous[:3],
+        "agent_ambiguous_candidates": agent_ambiguous[:3],
+    }
+
+
+def _plan_diff(deterministic: dict[str, Any], agentic: dict[str, Any]) -> dict[str, Any]:
+    def _steps(payload: dict[str, Any]) -> list[tuple[str, str]]:
+        ordered_steps = payload.get("ordered_steps", [])
+        if not isinstance(ordered_steps, list):
+            return []
+        values: list[tuple[str, str]] = []
+        for step in ordered_steps:
+            if not isinstance(step, dict):
+                continue
+            values.append((str(step.get("provider")), str(step.get("capability"))))
+        return values
+
+    deterministic_steps = _steps(deterministic)
+    agent_steps = _steps(agentic)
+    return {
+        "steps_changed": deterministic_steps != agent_steps,
+        "deterministic_steps": deterministic_steps,
+        "agent_steps": agent_steps,
+        "max_api_calls_changed": deterministic.get("max_api_calls") != agentic.get("max_api_calls"),
+        "deterministic_max_api_calls": deterministic.get("max_api_calls"),
+        "agent_max_api_calls": agentic.get("max_api_calls"),
+    }
+
+
+def _agent_route_from_llm(route: LlmProviderRoute) -> ModelRoute:
+    return ModelRoute(primary=route.primary_model, fallback=route.fallback_model)
+
+
+def resolve_service_stage(alert_payload: dict[str, Any], run_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    deterministic = _deterministic_service_identity(alert_payload)
+    tenant, environment = _tenant_and_environment(run_context)
+    rollout = _rollout_mode(run_context, tenant, environment)
+    llm_route = _llm_route(run_context, tenant, environment)
+    prompt_profile = _prompt_profile(run_context, tenant, environment, WorkflowStageId.RESOLVE_SERVICE_IDENTITY)
+    mcp_servers = _mcp_servers(run_context, tenant, environment)
+    mcp_tools = _mcp_tools(run_context, tenant, environment)
+
+    if rollout == AgentRolloutMode.ACTIVE:
+        agent_result = run_resolver_agent(
+            alert_payload=alert_payload,
+            model_route=_agent_route_from_llm(llm_route),
+            prompt_profile=prompt_profile,
+            mcp_servers=mcp_servers,
+            mcp_tools=mcp_tools,
+        )
+        validated = ServiceIdentity.model_validate(agent_result.payload)
+        payload = validated.model_dump(mode="json")
+        payload["llm_model_used"] = agent_result.llm_model_used
+        payload["llm_summary"] = agent_result.llm_summary
+        payload["stage_reasoning_summary"] = agent_result.stage_reasoning_summary
+        payload["tool_traces"] = [trace.model_dump(mode="json") for trace in agent_result.tool_traces]
+        payload["agent_rollout_mode"] = rollout.value
+        return payload
+
+    try:
+        agent_result = run_resolver_agent(
+            alert_payload=alert_payload,
+            model_route=_agent_route_from_llm(llm_route),
+            prompt_profile=prompt_profile,
+            mcp_servers=mcp_servers,
+            mcp_tools=mcp_tools,
+        )
+        validated = ServiceIdentity.model_validate(agent_result.payload)
+        compare_diff = _service_identity_diff(deterministic, validated.model_dump(mode="json"))
+        deterministic["agent_compare"] = compare_diff
+        deterministic["agent_rollout_mode"] = rollout.value
+        deterministic["llm_model_used"] = agent_result.llm_model_used
+        deterministic["llm_summary"] = agent_result.llm_summary
+        deterministic["stage_reasoning_summary"] = (
+            "Compare mode: deterministic output active. "
+            f"Agent candidate from {agent_result.llm_model_used} captured for scoring."
+        )
+        deterministic["tool_traces"] = [trace.model_dump(mode="json") for trace in agent_result.tool_traces]
+    except Exception as exc:
+        deterministic["agent_compare"] = {"agent_error": str(exc)}
+        deterministic["agent_rollout_mode"] = rollout.value
+    return deterministic
+
+
+def build_plan_stage(
+    investigation_id: str,
+    alert_payload: dict[str, Any],
+    run_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    deterministic = _deterministic_plan(investigation_id, alert_payload)
+    tenant, environment = _tenant_and_environment(run_context)
+    rollout = _rollout_mode(run_context, tenant, environment)
+    llm_route = _llm_route(run_context, tenant, environment)
+    prompt_profile = _prompt_profile(run_context, tenant, environment, WorkflowStageId.BUILD_INVESTIGATION_PLAN)
+    mcp_servers = _mcp_servers(run_context, tenant, environment)
+    mcp_tools = _mcp_tools(run_context, tenant, environment)
+
+    if rollout == AgentRolloutMode.ACTIVE:
+        agent_result = run_planner_agent(
+            investigation_id=investigation_id,
+            alert_payload=alert_payload,
+            model_route=_agent_route_from_llm(llm_route),
+            prompt_profile=prompt_profile,
+            mcp_servers=mcp_servers,
+            mcp_tools=mcp_tools,
+        )
+        validated = InvestigationPlan.model_validate(agent_result.payload)
+        payload = validated.model_dump(mode="json")
+        payload["llm_model_used"] = agent_result.llm_model_used
+        payload["llm_summary"] = agent_result.llm_summary
+        payload["stage_reasoning_summary"] = agent_result.stage_reasoning_summary
+        payload["tool_traces"] = [trace.model_dump(mode="json") for trace in agent_result.tool_traces]
+        payload["agent_rollout_mode"] = rollout.value
+        return payload
+
+    try:
+        agent_result = run_planner_agent(
+            investigation_id=investigation_id,
+            alert_payload=alert_payload,
+            model_route=_agent_route_from_llm(llm_route),
+            prompt_profile=prompt_profile,
+            mcp_servers=mcp_servers,
+            mcp_tools=mcp_tools,
+        )
+        validated = InvestigationPlan.model_validate(agent_result.payload)
+        compare_diff = _plan_diff(deterministic, validated.model_dump(mode="json"))
+        deterministic["agent_compare"] = compare_diff
+        deterministic["agent_rollout_mode"] = rollout.value
+        deterministic["llm_model_used"] = agent_result.llm_model_used
+        deterministic["llm_summary"] = agent_result.llm_summary
+        deterministic["stage_reasoning_summary"] = (
+            "Compare mode: deterministic plan active. "
+            f"Agent candidate from {agent_result.llm_model_used} captured for scoring."
+        )
+        deterministic["tool_traces"] = [trace.model_dump(mode="json") for trace in agent_result.tool_traces]
+    except Exception as exc:
+        deterministic["agent_compare"] = {"agent_error": str(exc)}
+        deterministic["agent_rollout_mode"] = rollout.value
+    return deterministic
 
 
 def collect_evidence_stage(

@@ -35,6 +35,102 @@ paths:
       responses:
         '200':
           description: Investigation payload
+  /v1/investigations:
+    get:
+      summary: List investigations with filters and pagination
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: source
+          in: query
+          schema:
+            type: string
+        - name: severity
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Investigation list
+  /v1/investigations/{id}/events:
+    get:
+      summary: Stream investigation timeline events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: text/event-stream
+  /v1/investigations/{id}/runs:
+    post:
+      summary: Start a new investigation workflow run
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Run started
+    get:
+      summary: List workflow runs for an investigation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Run list
+  /v1/investigations/{id}/runs/{run_id}:
+    get:
+      summary: Get run details with stage attempts and timeline
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Run details
+  /v1/investigations/{id}/runs/{run_id}/events:
+    get:
+      summary: Stream structured run events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: text/event-stream
   /v1/investigations/{id}/rerun:
     post:
       summary: Trigger controlled rerun
@@ -47,6 +143,12 @@ paths:
       responses:
         '200':
           description: Rerun accepted
+  /v1/internal/runs/events:
+    post:
+      summary: Internal callback endpoint for orchestrator step events
+      responses:
+        '200':
+          description: Event accepted
   /v1/catalog/mappings/upsert:
     post:
       summary: Upsert canonical service mappings
@@ -59,6 +161,147 @@ paths:
       responses:
         '200':
           description: Route updated
+  /v1/me:
+    get:
+      summary: Get authenticated user context
+      responses:
+        '200':
+          description: User context
+  /v1/settings/connectors:
+    get:
+      summary: List connector credential settings
+      responses:
+        '200':
+          description: Connector settings
+  /v1/settings/connectors/{provider}:
+    put:
+      summary: Upsert connector credential settings
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Connector setting updated
+  /v1/settings/connectors/{provider}/test:
+    post:
+      summary: Test connector configuration presence
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Connection test result
+  /v1/settings/llm-routes:
+    get:
+      summary: List model routes
+      responses:
+        '200':
+          description: Route list
+    put:
+      summary: Upsert model route
+      responses:
+        '200':
+          description: Route upsert response
+  /v1/settings/mcp-servers:
+    get:
+      summary: List MCP server configurations
+      responses:
+        '200':
+          description: MCP server list
+  /v1/settings/mcp-servers/{server_id}:
+    put:
+      summary: Upsert MCP server configuration
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: MCP server upsert response
+  /v1/settings/mcp-servers/{server_id}/test:
+    post:
+      summary: Test MCP server connectivity
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: MCP connectivity test result
+  /v1/settings/mcp-servers/{server_id}/tools:
+    get:
+      summary: List discovered MCP tools for server
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: MCP tool descriptors
+  /v1/settings/agent-prompts:
+    get:
+      summary: List agent prompt profiles
+      responses:
+        '200':
+          description: Agent prompt profile list
+  /v1/settings/agent-prompts/{stage_id}:
+    put:
+      summary: Upsert agent prompt profile for stage
+      parameters:
+        - name: stage_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent prompt profile upsert response
+  /v1/settings/agent-rollout:
+    get:
+      summary: Get agent rollout mode
+      responses:
+        '200':
+          description: Agent rollout configuration
+    put:
+      summary: Upsert agent rollout mode
+      responses:
+        '200':
+          description: Agent rollout upsert response
+  /v1/ui/workflow-layouts/{workflow_key}:
+    get:
+      summary: Get persisted workflow mapper layout for user
+      parameters:
+        - name: workflow_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow layout response
+    put:
+      summary: Save workflow mapper layout for user
+      parameters:
+        - name: workflow_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow layout upsert response
   /v1/evals/runs:
     post:
       summary: Trigger offline replay

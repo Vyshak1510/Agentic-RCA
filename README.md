@@ -49,6 +49,7 @@ Core services:
 - `services/orchestrator`
 - `services/analysis-engine`
 - `services/eval-service`
+- `services/web-ui`
 - `connectors/core/newrelic`
 - `connectors/core/azure`
 - `connectors/core/otel`
@@ -62,10 +63,22 @@ Core services:
 
 - `POST /v1/alerts`
 - `POST /v1/alerts/newrelic`
+- `GET /v1/investigations`
 - `GET /v1/investigations/{id}`
+- `GET /v1/investigations/{id}/events`
+- `POST /v1/investigations/{id}/runs`
+- `GET /v1/investigations/{id}/runs`
+- `GET /v1/investigations/{id}/runs/{run_id}`
+- `GET /v1/investigations/{id}/runs/{run_id}/events`
 - `POST /v1/investigations/{id}/rerun`
+- `POST /v1/internal/runs/events`
 - `POST /v1/catalog/mappings/upsert`
 - `POST /v1/providers/llm`
+- `GET /v1/settings/connectors`
+- `PUT /v1/settings/connectors/{provider}`
+- `POST /v1/settings/connectors/{provider}/test`
+- `GET /v1/settings/llm-routes`
+- `PUT /v1/settings/llm-routes`
 - `POST /v1/evals/runs`
 - `GET /v1/evals/runs/{id}`
 - `POST /v1/evals/adjudications`
@@ -130,3 +143,36 @@ This repository currently contains a production-oriented baseline scaffold for v
 - Connector SDK interfaces and contract tests
 - CRDs + Helm packaging baseline
 - Evaluation contracts, sample golden dataset, and CI gate workflow
+
+## Web UI (Starter)
+
+- Location: `services/web-ui`
+- Stack: Next.js + TypeScript + Tailwind
+- Interactive workflow mapper + run inspector (GitHub Actions style)
+- Routes:
+  - `/incidents/past`
+  - `/incidents/ongoing`
+  - `/incidents/{id}`
+  - `/settings`
+
+Run locally:
+
+```bash
+make web-install
+make web-dev
+```
+
+Environment variables:
+
+- `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`)
+- `NEXT_PUBLIC_API_KEY` (optional)
+- `NEXT_PUBLIC_DEFAULT_TENANT` (default `default`)
+- `NEXT_PUBLIC_DEFAULT_ROLE` (default `admin`)
+
+Backend run-orchestration environment variables:
+
+- `TEMPORAL_AUTOSTART_ENABLED` (default `true`)
+- `TEMPORAL_ADDRESS` (default `localhost:7233`)
+- `TEMPORAL_TASK_QUEUE` (default `rca-investigations`)
+- `ORCHESTRATOR_EVENT_BASE_URL` (default `http://localhost:8000`)
+- `ORCHESTRATOR_EVENT_TOKEN` (optional shared secret for internal run-event callbacks)

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: setup test lint run-ingest run-analysis run-eval run-orchestrator-worker run-orchestrator-demo
+.PHONY: setup test lint run-ingest run-analysis run-eval run-orchestrator-worker run-orchestrator-demo web-install web-dev
 
 setup:
 	$(PYTHON) -m pip install -e .[dev]
@@ -25,3 +25,9 @@ run-orchestrator-worker:
 
 run-orchestrator-demo:
 	$(PYTHON) services/orchestrator/app/run_demo.py
+
+web-install:
+	cd services/web-ui && npm install
+
+web-dev:
+	cd services/web-ui && npm run dev

@@ -10,6 +10,7 @@ from services.orchestrator.app.activities import (
     collect_evidence_activity,
     emit_eval_event_activity,
     publish_activity,
+    report_workflow_terminal_activity,
     resolve_service_activity,
     synthesize_report_activity,
 )
@@ -31,6 +32,7 @@ async def run_worker() -> None:
             synthesize_report_activity,
             publish_activity,
             emit_eval_event_activity,
+            report_workflow_terminal_activity,
         ],
     )
     await worker.run()

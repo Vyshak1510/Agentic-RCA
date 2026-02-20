@@ -22,6 +22,11 @@ evalService:
 orchestrator:
   replicas: 1
 
+webUi:
+  replicas: 1
+  port: 3000
+  apiBaseUrl: http://rca-platform-ingest-api:8000
+
 postgres:
   enabled: true
   host: postgres
