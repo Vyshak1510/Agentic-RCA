@@ -1,0 +1,32 @@
+[
+  {
+    "id": "inc-001",
+    "alert_input": {
+      "source": "newrelic",
+      "severity": "critical",
+      "incident_key": "nr-1001",
+      "entity_ids": ["service-checkout"],
+      "timestamps": {"triggered_at": "2026-02-16T00:00:00Z"},
+      "raw_payload_ref": "newrelic://nr-1001",
+      "raw_payload": {"condition": "Error rate > 5%"}
+    },
+    "expected_cause_label": "Database connection pool exhaustion",
+    "acceptable_synonyms": ["DB pool saturation", "Connection pool limit reached"],
+    "severity": "critical"
+  },
+  {
+    "id": "inc-002",
+    "alert_input": {
+      "source": "otel",
+      "severity": "high",
+      "incident_key": "ot-2001",
+      "entity_ids": ["api-orders"],
+      "timestamps": {"triggered_at": "2026-02-16T00:02:00Z"},
+      "raw_payload_ref": "otel://ot-2001",
+      "raw_payload": {"signal": "Latency p95 spike"}
+    },
+    "expected_cause_label": "Recent deployment introduced N+1 query",
+    "acceptable_synonyms": ["Inefficient query fanout", "N+1 regression"],
+    "severity": "high"
+  }
+]

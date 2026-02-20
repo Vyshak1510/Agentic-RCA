@@ -1,0 +1,10 @@
+# Example override for multi-tenant installs
+# Use namespace isolation and separate ConnectorConfig/ModelRoute objects per tenant.
+ingestApi:
+  replicas: 2
+analysisEngine:
+  replicas: 2
+
+auth:
+  apiKeySecretName: rca-api-key-multitenant
+  apiKeySecretKey: apiKey

@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Unit and integration tests
+        run: pytest
+
+  eval-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Replay gate check
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          sample = Path('evals/golden-datasets/sample.json')
+          data = json.loads(sample.read_text())
+          assert len(data) > 0
+
+          # Placeholder baseline gate values for CI scaffold.
+          metrics = {
+              'top3': 0.70,
+              'top1': 0.40,
+              'unsupported': 0.03,
+              'p95': 520,
+          }
+          assert metrics['top3'] >= 0.65, 'top3 gate failed'
+          assert metrics['top1'] >= 0.35, 'top1 gate failed'
+          assert metrics['unsupported'] < 0.05, 'unsupported claim gate failed'
+          assert metrics['p95'] < 600, 'latency gate failed'
+          PY

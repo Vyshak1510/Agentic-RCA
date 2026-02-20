@@ -1,0 +1,7 @@
+image:
+  repository: ghcr.io/example/rca-platform
+  tag: "0.1.0"
+
+auth:
+  apiKeySecretName: rca-api-key
+  apiKeySecretKey: apiKey

@@ -1,0 +1,21 @@
+ingestApi:
+  replicas: 3
+analysisEngine:
+  replicas: 3
+evalService:
+  replicas: 2
+orchestrator:
+  replicas: 2
+
+postgres:
+  enabled: true
+  host: postgres-primary
+
+redis:
+  enabled: true
+  host: redis-primary
+
+objectStore:
+  provider: s3
+  endpoint: s3.amazonaws.com
+  bucket: prod-rca-artifacts

@@ -1,0 +1,45 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: evalpolicies.rca.dev
+spec:
+  group: rca.dev
+  scope: Namespaced
+  names:
+    plural: evalpolicies
+    singular: evalpolicy
+    kind: EvalPolicy
+    shortNames:
+      - epol
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [thresholds, adjudication]
+              properties:
+                thresholds:
+                  type: object
+                  required: [top1HitRate, top3HitRate, unsupportedClaimRate, p95LatencySeconds]
+                  properties:
+                    top1HitRate:
+                      type: number
+                    top3HitRate:
+                      type: number
+                    unsupportedClaimRate:
+                      type: number
+                    p95LatencySeconds:
+                      type: number
+                adjudication:
+                  type: object
+                  required: [requiredPercentage, requiredWeeks]
+                  properties:
+                    requiredPercentage:
+                      type: integer
+                    requiredWeeks:
+                      type: integer

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-analysis-engine
+spec:
+  selector:
+    app: {{ include "rca-platform.fullname" . }}-analysis-engine
+  ports:
+    - port: {{ .Values.analysisEngine.port }}
+      targetPort: {{ .Values.analysisEngine.port }}
+      protocol: TCP

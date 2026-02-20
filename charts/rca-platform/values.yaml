@@ -1,0 +1,41 @@
+image:
+  repository: ghcr.io/example/rca-platform
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+auth:
+  apiKeySecretName: rca-api-key
+  apiKeySecretKey: apiKey
+
+ingestApi:
+  replicas: 1
+  port: 8000
+
+analysisEngine:
+  replicas: 1
+  port: 8001
+
+evalService:
+  replicas: 1
+  port: 8002
+
+orchestrator:
+  replicas: 1
+
+postgres:
+  enabled: true
+  host: postgres
+  port: 5432
+
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+
+objectStore:
+  provider: minio
+  endpoint: minio:9000
+  bucket: rca-artifacts
+
+otel:
+  endpoint: http://otel-collector:4318

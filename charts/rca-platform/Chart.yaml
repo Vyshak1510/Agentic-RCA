@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rca-platform
+description: Kubernetes-first, cloud-agnostic RCA platform
+version: 0.1.0
+appVersion: "0.1.0"
+type: application

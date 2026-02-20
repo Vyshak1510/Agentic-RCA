@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-orchestrator
+spec:
+  replicas: {{ .Values.orchestrator.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "rca-platform.fullname" . }}-orchestrator
+  template:
+    metadata:
+      labels:
+        app: {{ include "rca-platform.fullname" . }}-orchestrator
+    spec:
+      containers:
+        - name: orchestrator-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "services/orchestrator/app/worker.py"]

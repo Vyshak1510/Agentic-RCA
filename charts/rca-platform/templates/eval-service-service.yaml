@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-eval-service
+spec:
+  selector:
+    app: {{ include "rca-platform.fullname" . }}-eval-service
+  ports:
+    - port: {{ .Values.evalService.port }}
+      targetPort: {{ .Values.evalService.port }}
+      protocol: TCP

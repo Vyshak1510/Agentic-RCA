@@ -1,0 +1,35 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelroutes.rca.dev
+spec:
+  group: rca.dev
+  scope: Namespaced
+  names:
+    plural: modelroutes
+    singular: modelroute
+    kind: ModelRoute
+    shortNames:
+      - mroute
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [tenant, environment, primaryModel, fallbackModel, keyRef]
+              properties:
+                tenant:
+                  type: string
+                environment:
+                  type: string
+                primaryModel:
+                  type: string
+                fallbackModel:
+                  type: string
+                keyRef:
+                  type: string

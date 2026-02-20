@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-eval-service
+spec:
+  replicas: {{ .Values.evalService.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "rca-platform.fullname" . }}-eval-service
+  template:
+    metadata:
+      labels:
+        app: {{ include "rca-platform.fullname" . }}-eval-service
+    spec:
+      containers:
+        - name: eval-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "services/eval-service/app/run.py"]
+          ports:
+            - containerPort: {{ .Values.evalService.port }}

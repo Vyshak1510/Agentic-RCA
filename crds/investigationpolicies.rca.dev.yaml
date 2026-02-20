@@ -1,0 +1,42 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: investigationpolicies.rca.dev
+spec:
+  group: rca.dev
+  scope: Namespaced
+  names:
+    plural: investigationpolicies
+    singular: investigationpolicy
+    kind: InvestigationPolicy
+    shortNames:
+      - ipol
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [maxApiCalls, stageTimeoutSeconds, publish]
+              properties:
+                maxApiCalls:
+                  type: integer
+                  minimum: 1
+                stageTimeoutSeconds:
+                  type: integer
+                  minimum: 30
+                publicationRules:
+                  type: object
+                  properties:
+                    slackEnabled:
+                      type: boolean
+                    jiraEnabled:
+                      type: boolean
+                queryBudgets:
+                  type: object
+                  additionalProperties:
+                    type: integer

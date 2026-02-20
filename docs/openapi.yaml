@@ -1,0 +1,125 @@
+openapi: 3.1.0
+info:
+  title: RCA Agent Platform API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/alerts:
+    post:
+      summary: Ingest normalized alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertEnvelope'
+      responses:
+        '200':
+          description: Accepted
+  /v1/alerts/newrelic:
+    post:
+      summary: Ingest New Relic webhook
+      responses:
+        '200':
+          description: Accepted
+  /v1/investigations/{id}:
+    get:
+      summary: Get investigation status and artifacts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Investigation payload
+  /v1/investigations/{id}/rerun:
+    post:
+      summary: Trigger controlled rerun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rerun accepted
+  /v1/catalog/mappings/upsert:
+    post:
+      summary: Upsert canonical service mappings
+      responses:
+        '200':
+          description: Mapping updated
+  /v1/providers/llm:
+    post:
+      summary: Upsert model routing policy
+      responses:
+        '200':
+          description: Route updated
+  /v1/evals/runs:
+    post:
+      summary: Trigger offline replay
+      responses:
+        '200':
+          description: Eval run started
+  /v1/evals/runs/{id}:
+    get:
+      summary: Get eval run and gate outcomes
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Eval scorecard
+  /v1/evals/adjudications:
+    post:
+      summary: Submit human adjudication
+      responses:
+        '200':
+          description: Adjudication recorded
+  /v1/metrics:
+    get:
+      summary: Service metrics
+      responses:
+        '200':
+          description: Metrics snapshot
+  /v1/health:
+    get:
+      summary: Service health
+      responses:
+        '200':
+          description: Healthy
+components:
+  schemas:
+    AlertEnvelope:
+      type: object
+      required:
+        - source
+        - severity
+        - incident_key
+      properties:
+        source:
+          type: string
+        severity:
+          type: string
+        incident_key:
+          type: string
+        entity_ids:
+          type: array
+          items:
+            type: string
+        timestamps:
+          type: object
+          additionalProperties:
+            type: string
+            format: date-time
+        raw_payload_ref:
+          type: string
+        raw_payload:
+          type: object

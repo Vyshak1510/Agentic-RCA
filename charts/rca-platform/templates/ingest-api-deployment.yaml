@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-ingest-api
+spec:
+  replicas: {{ .Values.ingestApi.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "rca-platform.fullname" . }}-ingest-api
+  template:
+    metadata:
+      labels:
+        app: {{ include "rca-platform.fullname" . }}-ingest-api
+    spec:
+      containers:
+        - name: ingest-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "services/ingest-api/app/run.py"]
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.apiKeySecretName }}
+                  key: {{ .Values.auth.apiKeySecretKey }}
+          ports:
+            - containerPort: {{ .Values.ingestApi.port }}

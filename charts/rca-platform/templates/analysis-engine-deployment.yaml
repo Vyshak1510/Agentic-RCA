@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-platform.fullname" . }}-analysis-engine
+spec:
+  replicas: {{ .Values.analysisEngine.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "rca-platform.fullname" . }}-analysis-engine
+  template:
+    metadata:
+      labels:
+        app: {{ include "rca-platform.fullname" . }}-analysis-engine
+    spec:
+      containers:
+        - name: analysis-engine
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "services/analysis-engine/app/run.py"]
+          ports:
+            - containerPort: {{ .Values.analysisEngine.port }}

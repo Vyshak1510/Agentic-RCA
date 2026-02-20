@@ -1,0 +1,43 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: connectorconfigs.rca.dev
+spec:
+  group: rca.dev
+  scope: Namespaced
+  names:
+    plural: connectorconfigs
+    singular: connectorconfig
+    kind: ConnectorConfig
+    shortNames:
+      - ccfg
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [provider, authRef, scopes]
+              properties:
+                provider:
+                  type: string
+                authRef:
+                  type: string
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                rateLimits:
+                  type: object
+                  properties:
+                    qps:
+                      type: integer
+                    burst:
+                      type: integer
+                readOnly:
+                  type: boolean
+                  default: true
