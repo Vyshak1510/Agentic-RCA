@@ -23,6 +23,7 @@ async def start_investigation_workflow(
     agent_rollout_mode: str = "compare",
     mcp_servers: list[dict] | None = None,
     mcp_tools: list[dict] | None = None,
+    execution_policy: str = "mcp_only",
 ) -> tuple[str | None, str | None]:
     if getenv("TEMPORAL_AUTOSTART_ENABLED", "true").lower() in {"0", "false", "no"}:
         return None, "temporal autostart disabled by TEMPORAL_AUTOSTART_ENABLED"
@@ -53,6 +54,7 @@ async def start_investigation_workflow(
             agent_rollout_mode=agent_rollout_mode,
             mcp_servers=mcp_servers or [],
             mcp_tools=mcp_tools or [],
+            execution_policy=execution_policy,
         )
 
         await client.start_workflow(

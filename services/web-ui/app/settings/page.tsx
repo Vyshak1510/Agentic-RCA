@@ -332,7 +332,7 @@ export default function SettingsPage() {
             </label>
             <label className="block">
               <span className="mb-1 block text-slate-600">Secret Ref Key</span>
-              <input name="secret_ref_key" placeholder="token" className="w-full rounded-md border border-slate-300 px-3 py-2" />
+              <input name="secret_ref_key" placeholder="NEW_RELIC_API_KEY or GRAFANA_MCP_API_KEY" className="w-full rounded-md border border-slate-300 px-3 py-2" />
             </label>
             <label className="block">
               <span className="mb-1 block text-slate-600">Timeout Seconds</span>
@@ -435,7 +435,7 @@ export default function SettingsPage() {
             <input
               value={promptDraft.tool_allowlist_csv}
               onChange={(event) => setPromptDraft({ ...promptDraft, tool_allowlist_csv: event.target.value })}
-              placeholder="context.alert_entities,connector.newrelic.discover_context"
+              placeholder="mcp.grafana.*,mcp.jaeger.*"
               className="w-full rounded-md border border-slate-300 px-3 py-2"
             />
           </label>

@@ -23,6 +23,12 @@ paths:
       responses:
         '200':
           description: Accepted
+  /v1/alerts/grafana:
+    post:
+      summary: Ingest Grafana Alerting webhook
+      responses:
+        '200':
+          description: Accepted
   /v1/investigations/{id}:
     get:
       summary: Get investigation status and artifacts
@@ -208,6 +214,8 @@ paths:
       responses:
         '200':
           description: Route upsert response
+        '400':
+          description: Invalid/unresolved model alias
   /v1/settings/mcp-servers:
     get:
       summary: List MCP server configurations
@@ -240,7 +248,7 @@ paths:
           description: MCP connectivity test result
   /v1/settings/mcp-servers/{server_id}/tools:
     get:
-      summary: List discovered MCP tools for server
+      summary: List discovered MCP tools for server (includes arg_keys and required_args)
       parameters:
         - name: server_id
           in: path

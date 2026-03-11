@@ -13,13 +13,18 @@ from platform_core.models import (
     AlertEnvelope,
     ConnectorCredentialMode,
     ConnectorCredentialView,
+    EvidenceItem,
     EvalRunResult,
+    Hypothesis,
     InvestigationRecord,
+    InvestigationPlan,
     InvestigationStatus,
     LlmProviderRoute,
     McpServerConfig,
     McpToolDescriptor,
     MappingUpsertRequest,
+    RcaReport,
+    ServiceIdentity,
     StepAttempt,
     StepExecutionStatus,
     StepLogEntry,
@@ -68,7 +73,7 @@ class InMemoryStore:
                 objective_template="Resolve alert {{incident_key}} with bounded, evidence-linked reasoning.",
                 max_turns=4,
                 max_tool_calls=6,
-                tool_allowlist=[],
+                tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*"],
                 updated_at=now,
                 updated_by="system",
             )
@@ -283,6 +288,7 @@ class InMemoryStore:
 
             investigation = self.investigations.get(run.investigation_id)
             if investigation:
+                self._apply_stage_output_to_investigation(investigation, stored_event)
                 investigation.timeline.append(stored_event.message)
                 investigation.updated_at = stored_event.timestamp
                 investigation.status = run.status
@@ -294,6 +300,48 @@ class InMemoryStore:
                     investigation.active_run_id = run_id
 
             return stored_event
+
+    @staticmethod
+    def _apply_stage_output_to_investigation(
+        investigation: InvestigationRecord,
+        event: WorkflowRunEvent,
+    ) -> None:
+        if event.stage_status != StepExecutionStatus.COMPLETED or event.stage_id is None:
+            return
+
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+
+        try:
+            if event.stage_id == WorkflowStageId.RESOLVE_SERVICE_IDENTITY:
+                payload = metadata.get("service_identity")
+                if isinstance(payload, dict):
+                    investigation.service_identity = ServiceIdentity.model_validate(payload)
+                return
+
+            if event.stage_id == WorkflowStageId.BUILD_INVESTIGATION_PLAN:
+                payload = metadata.get("plan")
+                if isinstance(payload, dict):
+                    investigation.plan = InvestigationPlan.model_validate(payload)
+                return
+
+            if event.stage_id == WorkflowStageId.COLLECT_EVIDENCE:
+                payload = metadata.get("evidence")
+                if isinstance(payload, list):
+                    investigation.evidence = [EvidenceItem.model_validate(item) for item in payload if isinstance(item, dict)]
+                return
+
+            if event.stage_id == WorkflowStageId.SYNTHESIZE_RCA_REPORT:
+                report_payload = metadata.get("report")
+                if isinstance(report_payload, dict):
+                    investigation.report = RcaReport.model_validate(report_payload)
+
+                hypotheses_payload = metadata.get("hypotheses")
+                if isinstance(hypotheses_payload, list):
+                    investigation.hypotheses = [
+                        Hypothesis.model_validate(item) for item in hypotheses_payload if isinstance(item, dict)
+                    ]
+        except Exception:
+            return
 
     def list_run_events(self, run_id: str, cursor: int = 0) -> list[WorkflowRunEvent]:
         events = self.run_events.get(run_id, [])

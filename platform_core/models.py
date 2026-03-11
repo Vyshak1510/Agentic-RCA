@@ -66,6 +66,10 @@ class PlanStep(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1)
     budget_weight: int = Field(default=1, ge=1)
     capability: str
+    execution_source: str = "connector"
+    mcp_server_id: str | None = None
+    mcp_tool_name: str | None = None
+    mcp_arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class InvestigationPlan(BaseModel):
@@ -314,6 +318,8 @@ class McpToolDescriptor(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     read_only: bool = True
     light_probe: bool = False
+    arg_keys: list[str] = Field(default_factory=list)
+    required_args: list[str] = Field(default_factory=list)
 
 
 class AgentPromptProfile(BaseModel):

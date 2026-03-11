@@ -51,6 +51,7 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
         metadata = {
             "canonical_service_id": result.get("canonical_service_id"),
             "confidence": result.get("confidence"),
+            "service_identity": result,
         }
         if result.get("agent_rollout_mode"):
             metadata["agent_rollout_mode"] = result.get("agent_rollout_mode")
@@ -58,16 +59,25 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             metadata["agent_compare"] = result.get("agent_compare")
         if result.get("llm_model_used"):
             metadata["llm_model_used"] = result.get("llm_model_used")
+        if result.get("requested_model"):
+            metadata["requested_model"] = result.get("requested_model")
+        if result.get("resolved_model"):
+            metadata["resolved_model"] = result.get("resolved_model")
+        if result.get("model_error"):
+            metadata["model_error"] = result.get("model_error")
         if result.get("stage_reasoning_summary"):
             metadata["stage_reasoning_summary"] = result.get("stage_reasoning_summary")
         if result.get("tool_traces"):
             metadata["tool_traces"] = result.get("tool_traces")
+        if result.get("skipped_tools"):
+            metadata["skipped_tools"] = result.get("skipped_tools")
         return metadata
     if stage_id == WorkflowStageId.BUILD_INVESTIGATION_PLAN:
         metadata = {
             "step_count": len(result.get("ordered_steps", [])),
             "max_api_calls": result.get("max_api_calls"),
             "max_stage_wall_clock_seconds": result.get("max_stage_wall_clock_seconds"),
+            "plan": result,
         }
         if result.get("agent_rollout_mode"):
             metadata["agent_rollout_mode"] = result.get("agent_rollout_mode")
@@ -75,37 +85,80 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             metadata["agent_compare"] = result.get("agent_compare")
         if result.get("llm_model_used"):
             metadata["llm_model_used"] = result.get("llm_model_used")
+        if result.get("requested_model"):
+            metadata["requested_model"] = result.get("requested_model")
+        if result.get("resolved_model"):
+            metadata["resolved_model"] = result.get("resolved_model")
+        if result.get("model_error"):
+            metadata["model_error"] = result.get("model_error")
         if result.get("stage_reasoning_summary"):
             metadata["stage_reasoning_summary"] = result.get("stage_reasoning_summary")
         if result.get("tool_traces"):
             metadata["tool_traces"] = result.get("tool_traces")
+        if result.get("skipped_tools"):
+            metadata["skipped_tools"] = result.get("skipped_tools")
         return metadata
     if stage_id == WorkflowStageId.COLLECT_EVIDENCE:
+        executed_steps = int(result.get("executed_steps") or 0)
+        evidence_count = len(result.get("evidence", []))
         return {
-            "executed_steps": result.get("executed_steps"),
+            "executed_steps": executed_steps,
             "stopped_early": result.get("stopped_early"),
-            "evidence_count": len(result.get("evidence", [])),
+            "evidence_count": evidence_count,
+            "evidence": result.get("evidence", []),
+            "execution_trace": result.get("execution_trace", []),
+            "skipped_tools": result.get("skipped_tools", []),
+            "stage_reasoning_summary": (
+                f"Executed {executed_steps} collection step(s), produced {evidence_count} evidence item(s), "
+                f"early_stop={bool(result.get('stopped_early'))}."
+            ),
         }
     if stage_id == WorkflowStageId.SYNTHESIZE_RCA_REPORT:
         report = result.get("report", {})
+        llm_summary = result.get("llm_summary")
+        if isinstance(llm_summary, str) and llm_summary.strip():
+            reasoning = llm_summary.strip()
+        else:
+            reasoning = "Synthesized hypotheses from normalized evidence and ranked supporting citations."
         return {
             "llm_model_used": result.get("llm_model_used"),
+            "requested_model": result.get("requested_model"),
+            "resolved_model": result.get("resolved_model"),
+            "model_error": result.get("model_error"),
             "hypothesis_count": len(report.get("top_hypotheses", [])) if isinstance(report, dict) else 0,
             "confidence": report.get("confidence") if isinstance(report, dict) else None,
+            "report": report if isinstance(report, dict) else {},
+            "hypotheses": result.get("hypotheses", []),
+            "synthesis_trace": result.get("synthesis_trace", {}),
+            "stage_reasoning_summary": reasoning,
         }
     if stage_id == WorkflowStageId.PUBLISH_REPORT:
+        published = bool(result.get("published"))
         return {
-            "published": result.get("published"),
+            "published": published,
             "slack_message_id": result.get("slack_message_id"),
             "jira_issue_key": result.get("jira_issue_key"),
+            "publish_trace": result.get("publish_trace", {}),
+            "stage_reasoning_summary": (
+                "Publishing enabled; generated external publication identifiers."
+                if published
+                else "Publishing disabled for this run; external publication skipped."
+            ),
         }
     if stage_id == WorkflowStageId.EMIT_EVAL_EVENT:
+        top_count = result.get("top_hypothesis_count")
+        citation_count = result.get("citation_count")
+        latency_seconds = result.get("latency_seconds")
         return {
-            "top_hypothesis_count": result.get("top_hypothesis_count"),
-            "citation_count": result.get("citation_count"),
+            "top_hypothesis_count": top_count,
+            "citation_count": citation_count,
             "evidence_count": result.get("evidence_count"),
-            "latency_seconds": result.get("latency_seconds"),
+            "latency_seconds": latency_seconds,
             "rollout_mode": result.get("rollout_mode"),
+            "eval_trace": result.get("eval_trace", {}),
+            "stage_reasoning_summary": (
+                f"Eval event emitted with top_hypotheses={top_count}, citations={citation_count}, latency={latency_seconds}s."
+            ),
         }
 
     return {}
@@ -236,7 +289,7 @@ async def collect_evidence_activity(
         stage_id=WorkflowStageId.COLLECT_EVIDENCE,
         run_context=run_context,
         fn=collect_evidence_stage,
-        args=(investigation_id, alert_payload, plan_payload),
+        args=(investigation_id, alert_payload, plan_payload, run_context),
     )
 
 
@@ -251,7 +304,7 @@ async def synthesize_report_activity(
         stage_id=WorkflowStageId.SYNTHESIZE_RCA_REPORT,
         run_context=run_context,
         fn=synthesize_report_stage,
-        args=(alert_payload, service_identity_payload, evidence_payload),
+        args=(alert_payload, service_identity_payload, evidence_payload, run_context),
     )
 
 

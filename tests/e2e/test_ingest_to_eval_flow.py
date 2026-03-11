@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
 from tests.helpers import load_module
+
+
+def _auth_headers() -> dict[str, str]:
+    token = os.getenv("API_KEY")
+    if not token:
+        return {}
+    return {"x-api-key": token}
 
 
 def test_end_to_end_ingest_and_eval() -> None:
@@ -24,11 +32,11 @@ def test_end_to_end_ingest_and_eval() -> None:
         "raw_payload": {"condition": "error_rate"},
     }
 
-    ingest_resp = ingest_client.post("/v1/alerts", json=alert)
+    ingest_resp = ingest_client.post("/v1/alerts", json=alert, headers=_auth_headers())
     assert ingest_resp.status_code == 200
     inv_id = ingest_resp.json()["investigation_id"]
 
-    inv_resp = ingest_client.get(f"/v1/investigations/{inv_id}")
+    inv_resp = ingest_client.get(f"/v1/investigations/{inv_id}", headers=_auth_headers())
     assert inv_resp.status_code == 200
     assert inv_resp.json()["id"] == inv_id
 

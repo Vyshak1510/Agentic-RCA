@@ -27,7 +27,21 @@ def _sample_alert() -> dict:
     }
 
 
-def test_pipeline_generates_rca_payload() -> None:
+def _stub_summarize_with_model_route(*_: object, **__: object) -> tuple[str, str]:
+    return "openai/mock", "mock summary"
+
+
+def test_pipeline_generates_rca_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CODEX", "openai/mock-primary")
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CLAUDE", "anthropic/mock-fallback")
+    monkeypatch.setattr(
+        "platform_core.agent_runtime.summarize_with_model_route",
+        _stub_summarize_with_model_route,
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.app.pipeline.summarize_with_model_route",
+        _stub_summarize_with_model_route,
+    )
     investigation_id = f"inv-{uuid4()}"
     alert = _sample_alert()
 
@@ -35,7 +49,7 @@ def test_pipeline_generates_rca_payload() -> None:
     assert service_identity["canonical_service_id"]
 
     plan = build_plan_stage(investigation_id, alert)
-    assert len(plan["ordered_steps"]) > 0
+    assert isinstance(plan["ordered_steps"], list)
 
     evidence_result = collect_evidence_stage(investigation_id, alert, plan)
     assert evidence_result["evidence"]
@@ -54,7 +68,13 @@ def test_pipeline_generates_rca_payload() -> None:
     assert eval_event["rollout_mode"] == "shadow"
 
 
-def test_resolver_compare_mode_adds_agent_diff_metadata() -> None:
+def test_resolver_compare_mode_adds_agent_diff_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CODEX", "openai/mock-primary")
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CLAUDE", "anthropic/mock-fallback")
+    monkeypatch.setattr(
+        "platform_core.agent_runtime.summarize_with_model_route",
+        _stub_summarize_with_model_route,
+    )
     alert = _sample_alert()
     run_context = {
         "tenant": "default",
@@ -79,9 +99,16 @@ def test_resolver_compare_mode_adds_agent_diff_metadata() -> None:
     assert isinstance(result.get("tool_traces"), list)
 
 
-def test_planner_compare_mode_uses_light_probe_tools_only() -> None:
+def test_planner_compare_mode_uses_light_probe_tools_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CODEX", "openai/mock-primary")
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CLAUDE", "anthropic/mock-fallback")
+    monkeypatch.setattr(
+        "platform_core.agent_runtime.summarize_with_model_route",
+        _stub_summarize_with_model_route,
+    )
     investigation_id = f"inv-{uuid4()}"
     alert = _sample_alert()
+    now = datetime.now(timezone.utc).isoformat()
     run_context = {
         "tenant": "default",
         "environment": "prod",
@@ -94,8 +121,31 @@ def test_planner_compare_mode_uses_light_probe_tools_only() -> None:
             "key_ref": "llm-provider-secret",
         },
         "agent_prompt_profiles": {},
-        "mcp_servers": [],
-        "mcp_tools": [],
+        "mcp_servers": [
+            {
+                "server_id": "jaeger",
+                "tenant": "default",
+                "environment": "prod",
+                "transport": "http_sse",
+                "base_url": "http://jaeger-mcp:8000/mcp",
+                "secret_ref_name": None,
+                "secret_ref_key": None,
+                "timeout_seconds": 8,
+                "enabled": True,
+                "updated_at": now,
+                "updated_by": "test",
+            }
+        ],
+        "mcp_tools": [
+            {
+                "server_id": "jaeger",
+                "tool_name": "list_services",
+                "description": "list services",
+                "capabilities": ["tracing"],
+                "read_only": True,
+                "light_probe": True,
+            }
+        ],
     }
 
     result = build_plan_stage(investigation_id, alert, run_context)
@@ -105,6 +155,65 @@ def test_planner_compare_mode_uses_light_probe_tools_only() -> None:
     assert traces
     for trace in traces:
         assert ".collect." not in trace["tool_name"]
+
+
+def test_planner_outputs_mcp_only_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CODEX", "openai/mock-primary")
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CLAUDE", "anthropic/mock-fallback")
+    monkeypatch.setattr(
+        "platform_core.agent_runtime.summarize_with_model_route",
+        _stub_summarize_with_model_route,
+    )
+
+    investigation_id = f"inv-{uuid4()}"
+    alert = _sample_alert()
+    now = datetime.now(timezone.utc).isoformat()
+    run_context = {
+        "tenant": "default",
+        "environment": "prod",
+        "agent_rollout_mode": "active",
+        "llm_route": {
+            "tenant": "default",
+            "environment": "prod",
+            "primary_model": "codex",
+            "fallback_model": "claude",
+            "key_ref": "llm-provider-secret",
+        },
+        "mcp_servers": [
+            {
+                "server_id": "jaeger",
+                "tenant": "default",
+                "environment": "prod",
+                "transport": "http_sse",
+                "base_url": "http://jaeger-mcp:8000/mcp",
+                "secret_ref_name": None,
+                "secret_ref_key": None,
+                "timeout_seconds": 8,
+                "enabled": True,
+                "updated_at": now,
+                "updated_by": "test",
+            }
+        ],
+        "mcp_tools": [
+            {
+                "server_id": "jaeger",
+                "tool_name": "search_traces",
+                "description": "search traces",
+                "capabilities": ["tracing"],
+                "read_only": True,
+                "light_probe": False,
+                "arg_keys": ["service"],
+                "required_args": ["service"],
+            }
+        ],
+    }
+
+    result = build_plan_stage(investigation_id, alert, run_context)
+    assert result["ordered_steps"]
+    for step in result["ordered_steps"]:
+        assert step["provider"] == "mcp"
+        assert step["execution_source"] == "mcp"
+        assert step["mcp_server_id"] == "jaeger"
 
 
 def test_active_mode_invalid_route_raises_and_allows_strict_failure() -> None:
@@ -117,3 +226,70 @@ def test_active_mode_invalid_route_raises_and_allows_strict_failure() -> None:
     }
     with pytest.raises(Exception):
         resolve_service_stage(alert, invalid_run_context)
+
+
+def test_compare_mode_captures_model_error_without_failing() -> None:
+    alert = _sample_alert()
+    run_context = {
+        "tenant": "default",
+        "environment": "prod",
+        "agent_rollout_mode": "compare",
+        "llm_route": {
+            "tenant": "default",
+            "environment": "prod",
+            "primary_model": "codex",
+            "fallback_model": "claude",
+            "key_ref": "llm-provider-secret",
+        },
+        "mcp_servers": [],
+        "mcp_tools": [],
+    }
+
+    result = resolve_service_stage(alert, run_context)
+    assert result["agent_rollout_mode"] == "compare"
+    assert result.get("model_error")
+    assert "agent_compare" in result
+
+
+def test_active_mode_model_failure_is_terminal() -> None:
+    alert = _sample_alert()
+    run_context = {
+        "tenant": "default",
+        "environment": "prod",
+        "agent_rollout_mode": "active",
+        "llm_route": {
+            "tenant": "default",
+            "environment": "prod",
+            "primary_model": "codex",
+            "fallback_model": "claude",
+            "key_ref": "llm-provider-secret",
+        },
+        "mcp_servers": [],
+        "mcp_tools": [],
+    }
+
+    with pytest.raises(RuntimeError):
+        resolve_service_stage(alert, run_context)
+
+
+def test_collect_evidence_rejects_non_mcp_plan_step() -> None:
+    investigation_id = f"inv-{uuid4()}"
+    alert = _sample_alert()
+    plan = {
+        "investigation_id": investigation_id,
+        "ordered_steps": [
+            {
+                "provider": "otel",
+                "rationale": "legacy connector step",
+                "timeout_seconds": 60,
+                "budget_weight": 1,
+                "capability": "traces",
+                "execution_source": "connector",
+            }
+        ],
+        "max_api_calls": 1,
+        "max_stage_wall_clock_seconds": 600,
+    }
+
+    with pytest.raises(Exception):
+        collect_evidence_stage(investigation_id, alert, plan, {"execution_policy": "mcp_only"})

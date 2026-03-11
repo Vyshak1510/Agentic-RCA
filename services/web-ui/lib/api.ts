@@ -16,7 +16,9 @@ import {
   WorkflowRunSummary,
 } from "@/lib/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const INTERNAL_API_BASE = process.env.INTERNAL_API_BASE_URL;
+const API_BASE = typeof window === "undefined" ? (INTERNAL_API_BASE ?? PUBLIC_API_BASE) : PUBLIC_API_BASE;
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
 const DEFAULT_TENANT = process.env.NEXT_PUBLIC_DEFAULT_TENANT ?? "default";
 const DEFAULT_ROLE = process.env.NEXT_PUBLIC_DEFAULT_ROLE ?? "admin";

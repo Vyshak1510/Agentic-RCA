@@ -68,6 +68,38 @@ Cloud-agnostic, Kubernetes-first, Apache-2.0 open-source platform for alert-driv
 - Node.js 18+
 - Docker (for Temporal local)
 
+### One-Command Local Stack (Docker Compose)
+
+Start all local services (Temporal, ingest API, worker, web UI):
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+Or via `make`:
+
+```bash
+make compose-up
+```
+
+Stop the stack:
+
+```bash
+make compose-down
+```
+
+Tail logs:
+
+```bash
+make compose-logs
+```
+
+Service URLs:
+
+- Web UI: `http://localhost:3001`
+- Ingest API: `http://localhost:8000`
+- Temporal UI: `http://localhost:8080`
+
 ### 1) Install dependencies
 
 ```bash
@@ -135,6 +167,7 @@ Tip: stop the worker temporarily before posting alerts if you want incidents to 
 
 - `POST /v1/alerts`
 - `POST /v1/alerts/newrelic`
+- `POST /v1/alerts/grafana`
 - `GET /v1/investigations`
 - `GET /v1/investigations/{id}`
 - `GET /v1/investigations/{id}/events` (SSE)
@@ -183,14 +216,77 @@ Backend:
 - `ORCHESTRATOR_EVENT_TOKEN` (optional)
 - `API_KEY` (optional; if set, required by API)
 - `CORS_ALLOW_ORIGINS` (default `http://localhost:3000`; set to include `http://localhost:3001` for local web UI)
+- `RCA_MODEL_ALIAS_CODEX` (required when LLM route uses friendly alias `codex`)
+- `RCA_MODEL_ALIAS_CLAUDE` (required when LLM route uses friendly alias `claude`)
 
 Web UI:
 
 - `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`)
+- `INTERNAL_API_BASE_URL` (optional server-side override for containerized web UI)
 - `NEXT_PUBLIC_API_KEY` (optional)
 - `NEXT_PUBLIC_DEFAULT_TENANT` (default `default`)
 - `NEXT_PUBLIC_DEFAULT_ROLE` (default `admin`)
 - `NEXT_PUBLIC_DEFAULT_USER` (default `web-ui`)
+
+MCP auth helpers:
+
+- `NEW_RELIC_API_KEY` (recommended for New Relic MCP when `secret_ref_key=NEW_RELIC_API_KEY`)
+- `MCP_NEWRELIC_INCLUDE_TAGS` (optional comma-separated include tags forwarded as `include-tags` header)
+- `GRAFANA_MCP_API_KEY` (optional for Grafana MCP endpoints that require API key bearer auth)
+- `GRAFANA_URL` (used by local `grafana/mcp-grafana` sidecar, defaults to local demo URL)
+- `GRAFANA_SERVICE_ACCOUNT_TOKEN` (Grafana token for local `grafana/mcp-grafana` sidecar)
+- `GRAFANA_ORG_ID` (optional org id for local `grafana/mcp-grafana`)
+- `JAEGER_BASE_URL` (used by local `jaeger-mcp` sidecar, defaults to `http://host.docker.internal:50734`)
+- `JAEGER_API_PREFIX` (defaults to `/jaeger/ui/api`)
+- `JAEGER_TIMEOUT_SECONDS` (default `10`)
+
+## New Relic MCP Setup (Claude/Codex Tool Access)
+
+1. Add your New Relic user/API key to backend env:
+   - `NEW_RELIC_API_KEY=...`
+2. In **Settings -> MCP Server Registry**, add:
+   - `server_id`: `newrelic`
+   - `base_url`: `https://mcp.newrelic.com/mcp/`
+   - `secret_ref_key`: `NEW_RELIC_API_KEY`
+   - `enabled`: `true`
+3. Click **Test** and then **Load Tools** in the MCP section.
+4. Keep agent rollout in `compare` until traces/outputs look correct, then switch to `active`.
+
+Notes:
+
+- MCP client now uses streamable HTTP JSON-RPC (`initialize`, `tools/list`, `tools/call`).
+- For compatibility, legacy `/tools` and `/invoke` fallback is still supported.
+- The client sends both `Authorization: Bearer <token>` and `Api-Key: <token>` when a token is resolved.
+- `PUT /v1/settings/llm-routes` validates model aliases; unresolved `codex`/`claude` aliases return HTTP `400`.
+
+## Grafana Alerting + Grafana MCP Setup
+
+1. Configure Grafana webhook contact point to:
+   - `POST /v1/alerts/grafana`
+   - Example public URL: `https://<your-tunnel-domain>/v1/alerts/grafana?apiKey=<API_KEY>`
+2. The Grafana webhook payload is normalized into canonical `AlertEnvelope` (`source=grafana`) and starts the same Temporal workflow.
+3. Optional local Grafana MCP sidecar:
+   - `docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml up -d grafana-mcp`
+   - or `make compose-up-grafana-mcp`
+   - Then register MCP server in Settings:
+     - `server_id`: `grafana`
+     - `base_url`: `http://grafana-mcp:8000/mcp`
+     - `secret_ref_key`: leave blank for local sidecar unless you added endpoint auth.
+
+## Jaeger MCP Setup (Trace Access for Agentic Stages)
+
+1. Start local Jaeger MCP sidecar:
+   - `docker compose -f docker-compose.local.yml -f docker-compose.jaeger-mcp.local.yml up -d --build jaeger-mcp`
+   - or `make compose-up-jaeger-mcp`
+2. Register in **Settings -> MCP Server Registry**:
+   - `server_id`: `jaeger`
+   - `base_url`: `http://jaeger-mcp:8000/mcp`
+   - `secret_ref_key`: leave blank (local sidecar has no auth by default)
+3. Click **Test** and **Load Tools**.
+4. Optional: start both local MCP sidecars together:
+   - `make compose-up-all-mcp`
+5. Re-register both MCP servers in ingest settings after backend restart:
+   - `make bootstrap-local-mcp`
 
 ## Testing
 

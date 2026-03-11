@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: temporal-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8080
+    ports:
+      - "8080:8080"
+
+  ingest-api:
+    image: python:3.11-slim
+    container_name: rca-ingest-api
+    working_dir: /workspace
+    command: >-
+      sh -lc "pip install -e . &&
+      PYTHONPATH=/workspace uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir services/ingest-api/app"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      API_KEY: ${API_KEY:-}
+      TEMPORAL_AUTOSTART_ENABLED: "true"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_TASK_QUEUE: rca-investigations
+      ORCHESTRATOR_EVENT_BASE_URL: http://ingest-api:8000
+      CORS_ALLOW_ORIGINS: http://localhost:3001,http://localhost:3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+      NEW_RELIC_API_KEY: ${NEW_RELIC_API_KEY:-}
+      MCP_NEWRELIC_INCLUDE_TAGS: ${MCP_NEWRELIC_INCLUDE_TAGS:-}
+      GRAFANA_MCP_API_KEY: ${GRAFANA_MCP_API_KEY:-}
+      GRAFANA_URL: ${GRAFANA_URL:-}
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
+      GRAFANA_ORG_ID: ${GRAFANA_ORG_ID:-}
+      RCA_LLM_STRICT: ${RCA_LLM_STRICT:-0}
+    depends_on:
+      - temporal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/workspace
+      - pip-cache:/root/.cache/pip
+
+  orchestrator-worker:
+    image: python:3.11-slim
+    container_name: rca-orchestrator-worker
+    working_dir: /workspace
+    command: >-
+      sh -lc "pip install -e . &&
+      PYTHONPATH=/workspace python -m services.orchestrator.app.worker"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_TASK_QUEUE: rca-investigations
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+      NEW_RELIC_API_KEY: ${NEW_RELIC_API_KEY:-}
+      MCP_NEWRELIC_INCLUDE_TAGS: ${MCP_NEWRELIC_INCLUDE_TAGS:-}
+      GRAFANA_MCP_API_KEY: ${GRAFANA_MCP_API_KEY:-}
+      GRAFANA_URL: ${GRAFANA_URL:-}
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
+      GRAFANA_ORG_ID: ${GRAFANA_ORG_ID:-}
+      RCA_LLM_STRICT: ${RCA_LLM_STRICT:-0}
+    depends_on:
+      - temporal
+      - ingest-api
+    volumes:
+      - ./:/workspace
+      - pip-cache:/root/.cache/pip
+
+  web-ui:
+    image: node:20-alpine
+    container_name: rca-web-ui
+    working_dir: /workspace/services/web-ui
+    command: >-
+      sh -lc "npm install &&
+      npm run dev -- --hostname 0.0.0.0 --port 3001"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      INTERNAL_API_BASE_URL: http://ingest-api:8000
+      NEXT_PUBLIC_API_KEY: ${API_KEY:-}
+      NEXT_PUBLIC_DEFAULT_TENANT: default
+      NEXT_PUBLIC_DEFAULT_ROLE: admin
+      NEXT_PUBLIC_DEFAULT_USER: web-ui
+      WATCHPACK_POLLING: "true"
+    depends_on:
+      - ingest-api
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./:/workspace
+      - web-node-modules:/workspace/services/web-ui/node_modules
+      - web-next-cache:/workspace/services/web-ui/.next
+
+volumes:
+  temporal-postgres-data:
+  pip-cache:
+  web-node-modules:
+  web-next-cache:

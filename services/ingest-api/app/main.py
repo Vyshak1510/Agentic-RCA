@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 from datetime import datetime, timezone
+from hashlib import sha256
 from os import getenv
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from platform_core.mcp_client import discover_mcp_tools, test_mcp_server
+from platform_core.llm_router import ModelRoute, resolve_model_route
+from platform_core.mcp_planning import build_mcp_only_plan, derive_argument_context
 from platform_core.models import (
     AgentPromptProfile,
     AgentPromptProfileUpsertRequest,
@@ -40,7 +43,6 @@ from platform_core.models import (
     WorkflowRunEvent,
     WorkflowStageId,
 )
-from platform_core.planner import build_default_plan
 from platform_core.policy import enforce_budget_policy
 from platform_core.store import store
 
@@ -73,6 +75,120 @@ class NewRelicWebhook(BaseModel):
     entities: list[str] = []
     timestamp: datetime
     payload: dict = {}
+
+
+def _coerce_grafana_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            if value > 1_000_000_000_000:
+                return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _grafana_payload_to_envelope(payload: dict[str, Any]) -> AlertEnvelope:
+    alerts_raw = payload.get("alerts")
+    alerts = [item for item in alerts_raw if isinstance(item, dict)] if isinstance(alerts_raw, list) else []
+    first_alert = alerts[0] if alerts else {}
+
+    status = str(payload.get("status") or first_alert.get("status") or "").strip().lower()
+    labels = first_alert.get("labels") if isinstance(first_alert.get("labels"), dict) else {}
+    annotations = first_alert.get("annotations") if isinstance(first_alert.get("annotations"), dict) else {}
+
+    severity = (
+        labels.get("severity")
+        or labels.get("alert_severity")
+        or labels.get("level")
+        or payload.get("severity")
+        or payload.get("state")
+    )
+    if isinstance(severity, str):
+        severity = severity.strip().lower()
+    else:
+        severity = ""
+    if not severity:
+        severity = "critical" if status == "firing" else "info"
+
+    incident_key = str(payload.get("groupKey") or payload.get("group_key") or "").strip()
+    if not incident_key:
+        incident_key = str(first_alert.get("fingerprint") or "").strip()
+    if not incident_key:
+        seed = {
+            "receiver": payload.get("receiver"),
+            "status": status,
+            "labels": labels,
+            "startsAt": first_alert.get("startsAt"),
+        }
+        incident_key = f"grafana-{sha256(json.dumps(seed, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:16]}"
+
+    entity_candidates: list[str] = []
+    entity_keys = (
+        "service",
+        "service_name",
+        "job",
+        "app",
+        "namespace",
+        "pod",
+        "instance",
+        "container",
+        "deployment",
+        "alertname",
+    )
+    for alert in alerts:
+        alert_labels = alert.get("labels") if isinstance(alert.get("labels"), dict) else {}
+        for key in entity_keys:
+            value = alert_labels.get(key)
+            if isinstance(value, str) and value.strip():
+                entity_candidates.append(value.strip())
+    if not entity_candidates and isinstance(payload.get("receiver"), str):
+        entity_candidates.append(payload["receiver"].strip())
+    entity_ids = list(dict.fromkeys([item for item in entity_candidates if item]))[:24]
+
+    start_candidates = [_coerce_grafana_timestamp(alert.get("startsAt")) for alert in alerts]
+    end_candidates = [_coerce_grafana_timestamp(alert.get("endsAt")) for alert in alerts]
+    start_candidates = [item for item in start_candidates if item]
+    end_candidates = [item for item in end_candidates if item]
+    triggered_at = min(start_candidates) if start_candidates else datetime.now(timezone.utc)
+    updated_at = max([*start_candidates, *end_candidates]) if [*start_candidates, *end_candidates] else triggered_at
+
+    raw_ref = (
+        payload.get("externalURL")
+        or payload.get("externalUrl")
+        or first_alert.get("generatorURL")
+        or first_alert.get("dashboardURL")
+        or f"grafana://{incident_key}"
+    )
+
+    normalized_payload = {
+        **payload,
+        "receiver": payload.get("receiver"),
+        "status": status,
+        "title": payload.get("title") or annotations.get("summary") or labels.get("alertname"),
+    }
+
+    return AlertEnvelope(
+        source="grafana",
+        severity=severity,
+        incident_key=incident_key,
+        entity_ids=entity_ids,
+        timestamps={"triggered_at": triggered_at, "updated_at": updated_at},
+        raw_payload_ref=str(raw_ref) if raw_ref else f"grafana://{incident_key}",
+        raw_payload=normalized_payload,
+    )
 
 
 class RunStartRequest(BaseModel):
@@ -180,7 +296,7 @@ def _default_prompt_profile(
             ),
             max_turns=4,
             max_tool_calls=6,
-            tool_allowlist=[],
+            tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*"],
             updated_at=datetime.now(timezone.utc),
             updated_by=updated_by,
         )
@@ -199,7 +315,7 @@ def _default_prompt_profile(
         ),
         max_turns=4,
         max_tool_calls=6,
-        tool_allowlist=[],
+        tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*"],
         updated_at=datetime.now(timezone.utc),
         updated_by=updated_by,
     )
@@ -268,6 +384,7 @@ async def _start_investigation_run(
         agent_rollout_mode=rollout.mode.value,
         mcp_servers=mcp_servers,
         mcp_tools=mcp_tools,
+        execution_policy="mcp_only",
     )
 
     if started_workflow_id:
@@ -329,7 +446,18 @@ async def ingest_alert(
 ) -> AlertIngestResponse:
     investigation_id = str(uuid4())
     now = datetime.now(timezone.utc)
-    plan = build_default_plan(investigation_id=investigation_id, alert=alert)
+    mcp_tools = store.list_all_mcp_tools(tenant=user.tenant, environment="prod")
+    context = derive_argument_context(alert.model_dump(mode="json"), {})
+    default_allowlist = ["mcp.grafana.*", "mcp.jaeger.*"]
+    plan, _ = build_mcp_only_plan(
+        investigation_id=investigation_id,
+        tools=mcp_tools,
+        context=context,
+        allowlist=default_allowlist,
+        max_steps=6,
+        max_api_calls=10,
+        max_stage_wall_clock_seconds=600,
+    )
     enforce_budget_policy(plan)
 
     record = InvestigationRecord(
@@ -388,6 +516,16 @@ async def ingest_newrelic_alert(
         raw_payload_ref=f"newrelic://{payload.incident_id}",
         raw_payload=payload.payload,
     )
+    return await ingest_alert(envelope, _=None, user=user)
+
+
+@app.post("/v1/alerts/grafana")
+async def ingest_grafana_alert(
+    payload: dict[str, Any],
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(get_user_context),
+) -> AlertIngestResponse:
+    envelope = _grafana_payload_to_envelope(payload)
     return await ingest_alert(envelope, _=None, user=user)
 
 
@@ -725,6 +863,16 @@ def upsert_llm_route_settings(
     key = (route.tenant, route.environment)
     if route.tenant != user.tenant:
         raise HTTPException(status_code=403, detail="tenant mismatch")
+    try:
+        resolve_model_route(
+            ModelRoute(
+                primary=route.primary_model,
+                fallback=route.fallback_model,
+                key_ref=route.key_ref,
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid model route: {exc}") from exc
     store.llm_routes[key] = route
     return {"status": "ok", "tenant": route.tenant, "environment": route.environment}
 

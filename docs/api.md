@@ -4,6 +4,7 @@
 
 - `POST /v1/alerts`
 - `POST /v1/alerts/newrelic`
+- `POST /v1/alerts/grafana`
 - `GET /v1/investigations`
 - `GET /v1/investigations/{id}`
 - `GET /v1/investigations/{id}/events` (SSE)
@@ -32,6 +33,19 @@
 - `PUT /v1/settings/agent-prompts/{stage_id}`
 - `GET /v1/settings/agent-rollout`
 - `PUT /v1/settings/agent-rollout`
+
+### LLM Route Validation
+
+- `PUT /v1/settings/llm-routes` validates friendly aliases before saving:
+  - `codex` requires env `RCA_MODEL_ALIAS_CODEX`
+  - `claude` requires env `RCA_MODEL_ALIAS_CLAUDE`
+- If alias resolution fails, API returns `400 invalid model route`.
+
+### MCP Tool Descriptor Metadata
+
+- `GET /v1/settings/mcp-servers/{server_id}/tools` now returns MCP schema-derived fields:
+  - `arg_keys`
+  - `required_args`
 
 ## UI State
 

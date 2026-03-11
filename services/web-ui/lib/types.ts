@@ -169,6 +169,8 @@ export type McpToolDescriptor = {
   capabilities: string[];
   read_only: boolean;
   light_probe: boolean;
+  arg_keys: string[];
+  required_args: string[];
 };
 
 export type AgentPromptProfile = {

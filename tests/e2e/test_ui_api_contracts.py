@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
 from tests.helpers import load_module
+
+
+def _auth_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(extra or {})
+    token = os.getenv("API_KEY")
+    if token:
+        headers["x-api-key"] = token
+    return headers
 
 
 def _ingest_alert(client: TestClient, incident_key: str, severity: str = "critical") -> dict:
@@ -17,7 +26,7 @@ def _ingest_alert(client: TestClient, incident_key: str, severity: str = "critic
         "raw_payload_ref": f"newrelic://{incident_key}",
         "raw_payload": {"condition": "error_rate"},
     }
-    response = client.post("/v1/alerts", json=alert)
+    response = client.post("/v1/alerts", json=alert, headers=_auth_headers())
     assert response.status_code == 200
     return response.json()
 
@@ -29,7 +38,7 @@ def test_list_investigations_for_ui() -> None:
     _ingest_alert(client, "ui-1", severity="critical")
     _ingest_alert(client, "ui-2", severity="high")
 
-    response = client.get("/v1/investigations?page=1&page_size=10&severity=critical")
+    response = client.get("/v1/investigations?page=1&page_size=10&severity=critical", headers=_auth_headers())
     assert response.status_code == 200
     payload = response.json()
     assert payload["total"] >= 1
@@ -46,16 +55,20 @@ def test_run_apis_for_workflow_mapper() -> None:
     assert investigation_id
     assert run_id
 
-    list_runs = client.get(f"/v1/investigations/{investigation_id}/runs")
+    list_runs = client.get(f"/v1/investigations/{investigation_id}/runs", headers=_auth_headers())
     assert list_runs.status_code == 200
     list_payload = list_runs.json()
     assert list_payload["items"]
 
-    run_detail = client.get(f"/v1/investigations/{investigation_id}/runs/{run_id}")
+    run_detail = client.get(f"/v1/investigations/{investigation_id}/runs/{run_id}", headers=_auth_headers())
     assert run_detail.status_code == 200
     assert run_detail.json()["run_id"] == run_id
 
-    manual_run = client.post(f"/v1/investigations/{investigation_id}/runs", json={"publish_outputs": False})
+    manual_run = client.post(
+        f"/v1/investigations/{investigation_id}/runs",
+        json={"publish_outputs": False},
+        headers=_auth_headers(),
+    )
     assert manual_run.status_code == 200
     assert manual_run.json()["run_id"]
 
@@ -78,10 +91,121 @@ def test_run_apis_for_workflow_mapper() -> None:
     assert push_event.json()["status"] == "ok"
 
 
-def test_settings_connector_and_llm_routes() -> None:
+def test_investigation_record_persists_stage_outputs_from_events() -> None:
+    ingest_module = load_module("services/ingest-api/app/main.py", "ingest_ui_stage_persist")
+    client = TestClient(ingest_module.app)
+
+    created = _ingest_alert(client, "ui-stage-persist", severity="critical")
+    investigation_id = created["investigation_id"]
+    run_id = created["run_id"]
+    workflow_id = created.get("workflow_id")
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    service_identity = {
+        "canonical_service_id": "svc-frontend-proxy",
+        "owner": "platform-team",
+        "env": "prod",
+        "dependency_graph_refs": ["dep-a", "dep-b"],
+        "mapped_provider_ids": {"grafana": "frontend-proxy"},
+        "confidence": 0.82,
+        "ambiguous_candidates": [],
+    }
+    plan = {
+        "investigation_id": investigation_id,
+        "ordered_steps": [
+            {
+                "provider": "otel",
+                "rationale": "Fetch trace/metrics around incident window",
+                "timeout_seconds": 90,
+                "budget_weight": 2,
+                "capability": "traces",
+            }
+        ],
+        "max_api_calls": 10,
+        "max_stage_wall_clock_seconds": 600,
+    }
+    evidence = [
+        {
+            "provider": "otel",
+            "timestamp": timestamp,
+            "evidence_type": "traces",
+            "normalized_fields": {"span_error_rate": 0.31},
+            "citation_id": "c-otel-1",
+            "redaction_state": "redacted",
+        }
+    ]
+    hypotheses = [
+        {
+            "statement": "Dependency latency caused upstream timeout amplification.",
+            "confidence": 0.74,
+            "supporting_citations": ["c-otel-1"],
+            "counter_evidence_citations": [],
+        }
+    ]
+    report = {
+        "top_hypotheses": hypotheses,
+        "likely_cause": hypotheses[0]["statement"],
+        "blast_radius": "Frontend and checkout request paths.",
+        "recommended_manual_actions": ["Rollback recent ingress change and monitor latency."],
+        "confidence": 0.74,
+    }
+
+    events = [
+        {
+            "stage_id": "resolve_service_identity",
+            "metadata": {"service_identity": service_identity},
+        },
+        {
+            "stage_id": "build_investigation_plan",
+            "metadata": {"plan": plan},
+        },
+        {
+            "stage_id": "collect_evidence",
+            "metadata": {"evidence": evidence},
+        },
+        {
+            "stage_id": "synthesize_rca_report",
+            "metadata": {"report": report, "hypotheses": hypotheses},
+        },
+    ]
+
+    for idx, item in enumerate(events, start=1):
+        response = client.post(
+            "/v1/internal/runs/events",
+            json={
+                "run_id": run_id,
+                "investigation_id": investigation_id,
+                "workflow_id": workflow_id,
+                "stage_id": item["stage_id"],
+                "stage_status": "completed",
+                "run_status": "running",
+                "attempt": 1,
+                "timestamp": timestamp,
+                "message": f"{item['stage_id']} completed",
+                "citations": [],
+                "metadata": item["metadata"],
+                "logs": [],
+                "event_index": idx,
+            },
+        )
+        assert response.status_code == 200
+
+    investigation = client.get(f"/v1/investigations/{investigation_id}", headers=_auth_headers())
+    assert investigation.status_code == 200
+    payload = investigation.json()
+    assert payload["service_identity"]["canonical_service_id"] == "svc-frontend-proxy"
+    assert payload["plan"]["ordered_steps"][0]["provider"] == "otel"
+    assert payload["evidence"][0]["citation_id"] == "c-otel-1"
+    assert payload["hypotheses"][0]["statement"].startswith("Dependency latency")
+    assert payload["report"]["likely_cause"].startswith("Dependency latency")
+
+
+def test_settings_connector_and_llm_routes(monkeypatch) -> None:
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CODEX", "openai/mock-primary")
+    monkeypatch.setenv("RCA_MODEL_ALIAS_CLAUDE", "anthropic/mock-fallback")
     ingest_module = load_module("services/ingest-api/app/main.py", "ingest_ui_settings")
     client = TestClient(ingest_module.app)
-    headers = {"x-user-role": "admin", "x-tenant-id": "default", "x-user-id": "ops-admin"}
+    headers = _auth_headers({"x-user-role": "admin", "x-tenant-id": "default", "x-user-id": "ops-admin"})
 
     connector_payload = {
         "tenant": "default",
@@ -112,11 +236,31 @@ def test_settings_connector_and_llm_routes() -> None:
     assert llm_list.json()["items"][0]["primary_model"] == "codex"
 
 
+def test_settings_llm_routes_reject_unresolved_alias(monkeypatch) -> None:
+    monkeypatch.delenv("RCA_MODEL_ALIAS_CODEX", raising=False)
+    monkeypatch.delenv("RCA_MODEL_ALIAS_CLAUDE", raising=False)
+
+    ingest_module = load_module("services/ingest-api/app/main.py", "ingest_ui_settings_llm_invalid")
+    client = TestClient(ingest_module.app)
+    headers = _auth_headers({"x-user-role": "admin", "x-tenant-id": "default", "x-user-id": "ops-admin"})
+
+    llm_payload = {
+        "tenant": "default",
+        "environment": "prod",
+        "primary_model": "codex",
+        "fallback_model": "claude",
+        "key_ref": "llm-provider-secret",
+    }
+    llm_upsert = client.put("/v1/settings/llm-routes", json=llm_payload, headers=headers)
+    assert llm_upsert.status_code == 400
+    assert "invalid model route" in llm_upsert.json()["detail"]
+
+
 def test_settings_mcp_prompt_rollout_and_layout_apis() -> None:
     ingest_module = load_module("services/ingest-api/app/main.py", "ingest_ui_agentic")
     client = TestClient(ingest_module.app)
-    admin_headers = {"x-user-role": "admin", "x-tenant-id": "default", "x-user-id": "ops-admin"}
-    user_headers = {"x-user-role": "member", "x-tenant-id": "default", "x-user-id": "ops-user"}
+    admin_headers = _auth_headers({"x-user-role": "admin", "x-tenant-id": "default", "x-user-id": "ops-admin"})
+    user_headers = _auth_headers({"x-user-role": "member", "x-tenant-id": "default", "x-user-id": "ops-user"})
 
     mcp_payload = {
         "tenant": "default",
@@ -195,3 +339,43 @@ def test_settings_mcp_prompt_rollout_and_layout_apis() -> None:
     layout_get = client.get("/v1/ui/workflow-layouts/rca-v1-stage-map", headers=user_headers)
     assert layout_get.status_code == 200
     assert layout_get.json()["nodes"]
+
+
+def test_grafana_webhook_convenience_ingest() -> None:
+    ingest_module = load_module("services/ingest-api/app/main.py", "ingest_grafana_webhook")
+    client = TestClient(ingest_module.app)
+
+    payload = {
+        "receiver": "rca-webhook",
+        "status": "firing",
+        "groupKey": "{}:{alertname=\"HighErrorRate\",service=\"checkout\"}",
+        "externalURL": "http://grafana.local/alerting/list",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HighErrorRate",
+                    "service": "checkout",
+                    "instance": "checkout-0",
+                    "severity": "critical",
+                },
+                "annotations": {"summary": "checkout error rate high"},
+                "startsAt": "2026-03-06T12:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "fingerprint": "abc123",
+                "generatorURL": "http://grafana.local/d/xyz",
+            }
+        ],
+    }
+    response = client.post("/v1/alerts/grafana", json=payload, headers=_auth_headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["investigation_id"]
+    assert body["run_id"]
+
+    inv = client.get(f"/v1/investigations/{body['investigation_id']}", headers=_auth_headers())
+    assert inv.status_code == 200
+    alert = inv.json()["alert"]
+    assert alert["source"] == "grafana"
+    assert alert["severity"] == "critical"
+    assert "checkout" in alert["entity_ids"]

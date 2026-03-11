@@ -38,6 +38,7 @@ class InvestigationWorkflowInput:
     agent_rollout_mode: str = "compare"
     mcp_servers: list[dict[str, Any]] | None = None
     mcp_tools: list[dict[str, Any]] | None = None
+    execution_policy: str = "mcp_only"
 
     def run_context(self) -> dict[str, Any]:
         return {
@@ -54,6 +55,7 @@ class InvestigationWorkflowInput:
             "agent_rollout_mode": self.agent_rollout_mode,
             "mcp_servers": self.mcp_servers or [],
             "mcp_tools": self.mcp_tools or [],
+            "execution_policy": self.execution_policy,
         }
 
 

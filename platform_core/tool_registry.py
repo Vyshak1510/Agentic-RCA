@@ -18,6 +18,8 @@ class ToolDefinition:
     capability: str
     read_only: bool
     light_probe: bool
+    arg_keys: list[str] | None = None
+    required_args: list[str] | None = None
 
 
 class ToolRegistry:
@@ -89,6 +91,8 @@ class ToolRegistry:
                 capability="mcp",
                 read_only=tool.read_only,
                 light_probe=tool.light_probe,
+                arg_keys=tool.arg_keys,
+                required_args=tool.required_args,
             )
 
     def list_tools(
@@ -98,10 +102,24 @@ class ToolRegistry:
         allowlist: list[str] | None = None,
         light_probe_only: bool = False,
     ) -> list[ToolDefinition]:
-        allow = set(allowlist or [])
-        tools = list(self._definitions.values())
-        if allow:
-            tools = [tool for tool in tools if tool.name in allow]
+        allow = [entry.strip() for entry in (allowlist or []) if entry and entry.strip()]
+
+        def _is_allowed(tool_name: str) -> bool:
+            if not allow:
+                return True
+            for entry in allow:
+                if entry.endswith("*"):
+                    prefix = entry[:-1]
+                    if tool_name.startswith(prefix):
+                        return True
+                    continue
+                if tool_name == entry:
+                    return True
+            return False
+
+        # v1 policy: only expose read-only tools to agent stages.
+        tools = [tool for tool in self._definitions.values() if tool.read_only]
+        tools = [tool for tool in tools if _is_allowed(tool.name)]
         if stage_id == WorkflowStageId.BUILD_INVESTIGATION_PLAN:
             light_probe_only = True
         if light_probe_only:
@@ -125,6 +143,8 @@ class ToolRegistry:
                         "capability": tool.capability,
                         "read_only": tool.read_only,
                         "light_probe": tool.light_probe,
+                        "arg_keys": tool.arg_keys or [],
+                        "required_args": tool.required_args or [],
                     }
                     for tool in self._definitions.values()
                 ]
