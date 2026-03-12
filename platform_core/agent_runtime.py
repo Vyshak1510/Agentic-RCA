@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -297,5 +298,178 @@ def run_planner_agent(
         skipped_tools=skipped_tools,
         requested_model=requested_model,
         resolved_model=resolved_model,
+        model_error=model_error,
+    )
+
+
+def run_evidence_agent(
+    *,
+    investigation_id: str,
+    alert_payload: dict[str, Any],
+    model_route: ModelRoute,
+    prompt_profile: AgentPromptProfile,
+    mcp_servers: list[McpServerConfig] | None = None,
+    mcp_tools: list[McpToolDescriptor] | None = None,
+    max_iterations: int = 8,
+) -> AgentExecutionResult:
+    """LLM-driven ReAct loop for evidence collection.
+
+    The model sees tool results and decides what to call next, enabling
+    drill-down chains (e.g. search_traces → get_trace on the errored trace).
+    """
+    from litellm import completion as litellm_completion
+    from platform_core.llm_router import _api_base, _is_reasoning_model
+
+    alert = AlertEnvelope.model_validate(alert_payload)
+    servers = _server_map(mcp_servers)
+    requested_model = {"primary": model_route.primary, "fallback": model_route.fallback}
+    resolved_primary = resolve_model_alias(model_route.primary)
+    resolved_fallback = resolve_model_alias(model_route.fallback)
+    resolved_model_info = {"primary": resolved_primary, "fallback": resolved_fallback}
+
+    # Only offer read-only tools to the agent
+    available_tools = [t for t in (mcp_tools or []) if t.read_only]
+
+    # Build LiteLLM-compatible tool schemas; fn_name encodes server + tool
+    litellm_tools: list[dict[str, Any]] = []
+    tool_map: dict[str, McpToolDescriptor] = {}
+    for descriptor in available_tools:
+        fn_name = f"{descriptor.server_id}__{descriptor.tool_name}"
+        properties = {key: {"type": "string"} for key in descriptor.arg_keys}
+        litellm_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": fn_name,
+                    "description": descriptor.description or descriptor.tool_name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": descriptor.required_args,
+                    },
+                },
+            }
+        )
+        tool_map[fn_name] = descriptor
+
+    entity_ids = ", ".join(alert.entity_ids) if alert.entity_ids else "unknown"
+    system_content = (
+        "You are an SRE incident investigator with access to observability tools.\n"
+        f"Alert: {alert.incident_key} — {json.dumps(alert.raw_payload)}\n"
+        f"Service under investigation: {entity_ids}\n"
+        "Your job: gather evidence to identify the root cause using observability tools.\n"
+        "IMPORTANT: You MUST call at least one tool before drawing any conclusions. "
+        "Never infer root cause from the alert name or description alone — always verify with real data.\n"
+        "Start broad (list services, search traces with error filter), then drill in (get_trace on errored traces).\n"
+        "Stop calling tools only after you have reviewed actual span/metric data."
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": f"Investigate incident {alert.incident_key}. Use tools to find the root cause."},
+    ]
+
+    traces: list[AgentToolTrace] = []
+    evidence_payloads: list[dict[str, Any]] = []
+    model_used = resolved_primary
+    model_error: str | None = None
+    conclusion = ""
+    active_model = resolved_primary
+    iterations_run = 0
+
+    def _do_completion(model: str, first_turn: bool = False) -> Any:
+        kwargs: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": 1024}
+        if litellm_tools:
+            kwargs["tools"] = litellm_tools
+            kwargs["tool_choice"] = "required" if first_turn else "auto"
+        if not _is_reasoning_model(model):
+            kwargs["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+        api_key = (os.getenv(model_route.key_ref) if model_route.key_ref else None) or os.getenv("LITELLM_API_KEY")
+        if api_key:
+            kwargs["api_key"] = api_key
+        api_base = _api_base()
+        if api_base:
+            kwargs["api_base"] = api_base
+        return litellm_completion(**kwargs)
+
+    for iteration in range(max_iterations):
+        iterations_run = iteration + 1
+        first_turn = iteration == 0
+        try:
+            response = _do_completion(active_model, first_turn=first_turn)
+        except Exception as exc:
+            if active_model == resolved_primary:
+                active_model = resolved_fallback
+                try:
+                    response = _do_completion(active_model, first_turn=first_turn)
+                except Exception as exc2:
+                    model_error = str(exc2)
+                    break
+            else:
+                model_error = str(exc)
+                break
+
+        model_used = active_model
+        choice = response.choices[0]
+        message = choice.message
+        tool_calls = getattr(message, "tool_calls", None)
+        content = getattr(message, "content", None) or ""
+
+        # Serialize assistant message back into history
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if not tool_calls:
+            conclusion = content
+            break
+
+        # Execute each tool call and feed results back
+        for tc in tool_calls:
+            fn_name = tc.function.name
+            try:
+                arguments = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                arguments = {}
+
+            descriptor = tool_map.get(fn_name)
+            if not descriptor:
+                tool_result_str = json.dumps({"error": f"Unknown tool: {fn_name}"})
+            else:
+                tool_result, trace = _execute_mcp_tool(servers, descriptor, arguments)
+                traces.append(trace)
+                evidence_payloads.append(
+                    {
+                        "tool": fn_name,
+                        "server_id": descriptor.server_id,
+                        "tool_name": descriptor.tool_name,
+                        "arguments": arguments,
+                        "result": tool_result,
+                    }
+                )
+                tool_result_str = json.dumps(tool_result)
+
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result_str})
+
+    reasoning = (
+        f"Evidence agent (model={model_used}) executed {len(traces)} tool call(s) "
+        f"across {iterations_run} iteration(s); collected {len(evidence_payloads)} evidence item(s)."
+    )
+    return AgentExecutionResult(
+        payload={"evidence_payloads": evidence_payloads, "conclusion": conclusion},
+        llm_model_used=model_used,
+        llm_summary=conclusion or f"Agent collected {len(evidence_payloads)} evidence item(s).",
+        stage_reasoning_summary=reasoning,
+        tool_traces=traces,
+        skipped_tools=[],
+        requested_model=requested_model,
+        resolved_model=resolved_model_info,
         model_error=model_error,
     )

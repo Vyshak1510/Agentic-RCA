@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import json
 from typing import Any
 
-from platform_core.agent_runtime import run_planner_agent, run_resolver_agent
+from platform_core.agent_runtime import run_evidence_agent, run_planner_agent, run_resolver_agent
 from platform_core.evidence_store import EvidenceStore
 from platform_core.llm_router import ModelRoute, resolve_model_alias, summarize_with_model_route
 from platform_core.mcp_client import invoke_mcp_tool
@@ -408,9 +409,63 @@ def collect_evidence_stage(
 
     policy_service = PolicyService()
     evidence_store = EvidenceStore()
-    provider_signal_counts: defaultdict[str, int] = defaultdict(int)
+    rollout_mode = _rollout_mode(run_context, tenant, environment)
 
-    timeline: list[str] = []
+    # --- ACTIVE mode: LLM-driven ReAct loop ---
+    if rollout_mode == AgentRolloutMode.ACTIVE:
+        llm_route = _llm_route(run_context, tenant, environment)
+        prompt_profile = _prompt_profile(run_context, tenant, environment, WorkflowStageId.COLLECT_EVIDENCE)
+        mcp_tools = _mcp_tools(run_context, tenant, environment)
+
+        agent_result = run_evidence_agent(
+            investigation_id=investigation_id,
+            alert_payload=alert_payload,
+            model_route=_agent_route_from_llm(llm_route),
+            prompt_profile=prompt_profile,
+            mcp_servers=list(servers.values()),
+            mcp_tools=mcp_tools,
+        )
+
+        timeline: list[str] = []
+        for ep in agent_result.payload.get("evidence_payloads", []):
+            server_id = ep.get("server_id") or ep.get("tool", "").split("__")[0]
+            tool_name = ep.get("tool_name") or ep.get("tool", "unknown")
+            evidence = evidence_store.add(
+                investigation_id=investigation_id,
+                provider=server_id,
+                evidence_type=tool_name,
+                payload=ep.get("result", {}),
+            )
+            policy_service.validate_redaction_state(evidence.redaction_state)
+            timeline.append(f"Agent called {ep.get('tool', tool_name)} → collected evidence")
+
+        evidence_items = evidence_store.list(investigation_id)
+        if not evidence_items:
+            fallback_evidence = evidence_store.add(
+                investigation_id=investigation_id,
+                provider="mcp",
+                evidence_type="alert-context",
+                payload={"incident_key": alert.incident_key, "raw_payload_ref": alert.raw_payload_ref},
+            )
+            policy_service.validate_redaction_state(fallback_evidence.redaction_state)
+            evidence_items = [fallback_evidence]
+            timeline.append("Agent found no evidence; used alert-context fallback.")
+
+        return {
+            "executed_steps": len(agent_result.tool_traces),
+            "stopped_early": False,
+            "timeline": timeline,
+            "execution_trace": [trace.model_dump(mode="json") for trace in agent_result.tool_traces],
+            "skipped_tools": agent_result.skipped_tools,
+            "evidence": [item.model_dump(mode="json") for item in evidence_items],
+            "agent_rollout_mode": AgentRolloutMode.ACTIVE.value,
+            "llm_model_used": agent_result.llm_model_used,
+            "stage_reasoning_summary": agent_result.stage_reasoning_summary,
+        }
+
+    # --- Deterministic path: execute static plan steps ---
+    provider_signal_counts: defaultdict[str, int] = defaultdict(int)
+    timeline = []
     execution_trace: list[dict[str, Any]] = []
     skipped_tools: list[dict[str, Any]] = []
     executed_steps = 0
@@ -511,6 +566,44 @@ def collect_evidence_stage(
     }
 
 
+def _evidence_text(item: EvidenceItem) -> str:
+    """Unwrap MCP content envelope and present evidence compactly.
+
+    MCP tools return {"content": [{"type": "text", "text": "...JSON..."}]}.
+    For span lists (get_trace), sort erroring spans first so the synthesis
+    LLM always sees the most relevant evidence within the token budget.
+    """
+    fields = item.normalized_fields
+    content = fields.get("content")
+    if isinstance(content, list) and content:
+        first = content[0]
+        if isinstance(first, dict) and first.get("type") == "text":
+            raw = first.get("text", "")
+            try:
+                inner = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return raw[:3000]
+            if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+                # Span list: sort errors first, keep top 12, drop noisy keys
+                _KEEP = {"operationName", "service", "error", "duration_us", "tags"}
+
+                def _slim(s: dict) -> dict:
+                    slim = {k: v for k, v in s.items() if k in _KEEP}
+                    if isinstance(slim.get("tags"), dict):
+                        slim["tags"] = {
+                            k: v for k, v in slim["tags"].items()
+                            if any(tok in k for tok in ("error", "status", "grpc", "http", "app.", "exception"))
+                        }
+                    return slim
+
+                erroring = [_slim(s) for s in inner if s.get("error")]
+                ok = [_slim(s) for s in inner if not s.get("error")]
+                ordered = erroring + ok
+                return json.dumps(ordered[:12], indent=2)[:4000]
+            return json.dumps(inner)[:3000]
+    return json.dumps(fields)[:3000]
+
+
 def synthesize_report_stage(
     alert_payload: dict[str, Any],
     service_identity_payload: dict[str, Any],
@@ -534,15 +627,61 @@ def synthesize_report_stage(
         }
         for provider, citations in provider_rank
     ]
-    templates = {
-        "grafana": "Grafana alerting/annotation signals indicate elevated failure conditions in the target scope.",
-        "jaeger": "Trace anomalies indicate latency/error concentration in a request path dependency.",
-        "mcp": "MCP-collected context indicates a service-level degradation pattern requiring manual mitigation.",
-    }
+    tenant, environment = _tenant_and_environment(run_context)
+    llm_route = _llm_route(run_context, tenant, environment)
+    route = _agent_route_from_llm(llm_route)
 
+    evidence_digest = "\n\n".join(
+        f"[{item.provider.upper()} / {item.evidence_type}]\n" + _evidence_text(item)
+        for item in evidence_items
+    )
+    alert_obj = AlertEnvelope.model_validate(alert_payload)
+    synthesis_prompt = (
+        f"You are an SRE analyzing an incident for service '{service_identity.canonical_service_id}'.\n\n"
+        f"ALERT: {json.dumps(alert_obj.raw_payload)}\n\n"
+        f"EVIDENCE ({len(evidence_items)} items):\n{evidence_digest}\n\n"
+        "Tasks:\n"
+        "1. Identify the most likely root cause. Be specific — name the exact error, config change, feature flag, "
+        "or dependency failure. Do not give generic answers.\n"
+        "2. Write 1-3 concise hypothesis statements (one per line, prefixed 'H1:', 'H2:', 'H3:') ranked by confidence.\n"
+        "3. On a final line prefixed 'CAUSE:', state the single most likely root cause in one sentence.\n"
+        "4. On a line prefixed 'ACTIONS:', list 2-3 concrete remediation steps separated by '|'."
+    )
+
+    model_used, llm_summary = summarize_with_model_route(
+        route,
+        synthesis_prompt,
+        system_prompt="You are a precise SRE incident analyst. Ground every conclusion in the evidence provided.",
+        max_tokens=800,
+    )
+
+    # Parse LLM output into structured fields
+    hypothesis_statements: list[str] = []
+    likely_cause = "Unable to determine root cause."
+    recommended_actions = [
+        "Validate recent deploys/config changes for impacted service and dependencies.",
+        "Correlate logs/traces around incident window and confirm rollback criteria.",
+        "Escalate to service owner for manual mitigation if customer impact persists.",
+    ]
+    for line in llm_summary.splitlines():
+        line = line.strip()
+        if line.startswith(("H1:", "H2:", "H3:")):
+            hypothesis_statements.append(line[3:].strip())
+        elif line.startswith("CAUSE:"):
+            likely_cause = line[6:].strip()
+        elif line.startswith("ACTIONS:"):
+            parts = [a.strip() for a in line[8:].split("|") if a.strip()]
+            if parts:
+                recommended_actions = parts
+
+    # Build hypotheses: LLM-generated statements where available, citation-backed
     hypotheses: list[Hypothesis] = []
     for idx, (provider, citations) in enumerate(provider_rank[:3]):
-        statement = templates.get(provider, "Correlated evidence indicates a service-level degradation pattern.")
+        statement = (
+            hypothesis_statements[idx]
+            if idx < len(hypothesis_statements)
+            else f"Evidence from {provider} indicates a degradation pattern for {service_identity.canonical_service_id}."
+        )
         hypotheses.append(
             Hypothesis(
                 statement=statement,
@@ -552,33 +691,23 @@ def synthesize_report_stage(
             )
         )
 
-    enforce_citation_policy(hypotheses)
+    if not hypotheses:
+        hypotheses.append(
+            Hypothesis(
+                statement=likely_cause,
+                confidence=0.5,
+                supporting_citations=[c for _, cits in provider_rank[:1] for c in cits[:1]],
+                counter_evidence_citations=[],
+            )
+        )
 
-    tenant, environment = _tenant_and_environment(run_context)
-    llm_route = _llm_route(run_context, tenant, environment)
-    route = _agent_route_from_llm(llm_route)
-    prompt = (
-        f"Synthesize RCA for service {service_identity.canonical_service_id} "
-        f"using {len(evidence_items)} evidence item(s)."
-    )
-    model_used, llm_summary = summarize_with_model_route(
-        route,
-        prompt,
-        system_prompt=(
-            "You are an RCA synthesis assistant. Summarize likely cause and evidence strength in concise text."
-        ),
-        max_tokens=320,
-    )
+    enforce_citation_policy(hypotheses)
 
     report = RcaReport(
         top_hypotheses=hypotheses,
-        likely_cause=hypotheses[0].statement,
+        likely_cause=likely_cause,
         blast_radius=f"Primary impact on {service_identity.canonical_service_id} and direct dependencies.",
-        recommended_manual_actions=[
-            "Validate recent deploys/config changes for impacted service and dependencies.",
-            "Correlate logs/traces around incident window and confirm rollback criteria.",
-            "Escalate to service owner for manual mitigation if customer impact persists.",
-        ],
+        recommended_manual_actions=recommended_actions,
         confidence=round(sum(h.confidence for h in hypotheses) / len(hypotheses), 2),
     )
 

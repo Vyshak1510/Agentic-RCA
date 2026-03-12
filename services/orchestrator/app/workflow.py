@@ -121,7 +121,7 @@ class InvestigationWorkflow:
                 wf_input.alert,
                 service_identity,
                 evidence_result["evidence"],
-                timeout_seconds=30,
+                timeout_seconds=90,
             )
             timeline.append(f"RCA synthesized using model: {synthesis['llm_model_used']}")
 

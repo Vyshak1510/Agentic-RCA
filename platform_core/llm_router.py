@@ -109,6 +109,11 @@ def _api_base() -> str | None:
     return os.getenv("LITELLM_BASE_URL") or os.getenv("LLM_API_BASE")
 
 
+def _is_reasoning_model(model: str) -> bool:
+    lowered = model.lower()
+    return any(seg in lowered for seg in ("/o1", "/o3", "/o4", "-o1", "-o3", "-o4", "codex"))
+
+
 def _call_model(route: ModelRoute, model: str, prompt: str, system_prompt: str, max_tokens: int) -> str:
     kwargs: dict[str, Any] = {
         "model": model,
@@ -116,9 +121,10 @@ def _call_model(route: ModelRoute, model: str, prompt: str, system_prompt: str, 
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.1")),
         "max_tokens": max_tokens,
     }
+    if not _is_reasoning_model(model):
+        kwargs["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     api_key = _resolve_api_key(route)
     if api_key:
         kwargs["api_key"] = api_key
