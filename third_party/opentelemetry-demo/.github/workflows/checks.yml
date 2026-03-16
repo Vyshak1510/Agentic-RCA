@@ -1,0 +1,111 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+name: Checks
+
+on:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_images:
+    permissions:  # required by the reusable workflow
+      contents: read
+      packages: write
+    uses: ./.github/workflows/component-build-images.yml
+    with:
+      push: ${{ github.event_name == 'push' }}
+      # Use a non-release tag for PR builds; tags are not pushed when push=false.
+      version: ${{ github.event_name == 'push' && 'main' || 'dev' }}
+    secrets: inherit
+
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out code
+        uses: actions/checkout@v6.0.2
+      - name: install dependencies
+        run: npm install
+      - name: run markdownlint
+        run: make markdownlint
+
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out code
+        uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: install yamllint
+        run: make install-yamllint
+      - name: run yamllint
+        run: yamllint . -f github
+
+  misspell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out code
+        uses: actions/checkout@v6.0.2
+      - name: run misspell
+        run: make misspell
+
+  checklinks:
+    name: linkspector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Run linkspector
+        uses: umbrelladocs/action-linkspector@v1
+        with:
+          level: info
+          fail_level: any
+          config_file: '.linkspector.yml'
+
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: run sanitycheck.py
+        run: python3 ./internal/tools/sanitycheck.py
+
+  checklicense:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out code
+        uses: actions/checkout@v6.0.2
+      - name: run checklicense
+        run: make checklicense
+
+  build-test:
+    needs: [
+      build_images,
+      markdownlint,
+      yamllint,
+      misspell,
+      checklinks,
+      sanity,
+      checklicense
+    ]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report CI status
+        shell: bash
+        env:
+          CI_SUCCESS: ${{ !contains(needs.*.result, 'failure') }}
+        run: |
+          if [ "${CI_SUCCESS}" == "true" ]
+          then
+            echo 'Build complete ✓'
+          else
+            echo 'Build failed ✗'
+            exit 1
+          fi
