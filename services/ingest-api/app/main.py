@@ -28,14 +28,24 @@ from platform_core.models import (
     ConnectorCredentialMode,
     ConnectorCredentialUpsertRequest,
     ConnectorCredentialView,
+    ContextArtifactUploadRequest,
+    ContextPack,
+    ContextPackActivateRequest,
+    ContextPackCreateRequest,
     InvestigationRecord,
+    InvestigationTeamProfile,
+    InvestigationTeamProfileUpsertRequest,
     InvestigationStatus,
     LlmProviderRoute,
     McpServerConfig,
     McpServerUpsertRequest,
     McpToolDescriptor,
     MappingUpsertRequest,
+    StageMissionProfile,
+    StageMissionProfileUpsertRequest,
     StepExecutionStatus,
+    TeamMissionProfile,
+    TeamMissionProfileUpsertRequest,
     UserContext,
     WorkflowLayoutState,
     WorkflowLayoutUpsertRequest,
@@ -296,7 +306,7 @@ def _default_prompt_profile(
             ),
             max_turns=4,
             max_tool_calls=6,
-            tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*"],
+            tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"],
             updated_at=datetime.now(timezone.utc),
             updated_by=updated_by,
         )
@@ -315,8 +325,188 @@ def _default_prompt_profile(
         ),
         max_turns=4,
         max_tool_calls=6,
-        tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*"],
+        tool_allowlist=["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"],
         updated_at=datetime.now(timezone.utc),
+        updated_by=updated_by,
+    )
+
+
+def _default_stage_mission(
+    tenant: str,
+    environment: str,
+    stage_id: WorkflowStageId,
+    updated_by: str,
+) -> StageMissionProfile:
+    now = datetime.now(timezone.utc)
+    defaults: dict[WorkflowStageId, dict[str, Any]] = {
+        WorkflowStageId.RESOLVE_SERVICE_IDENTITY: {
+            "mission_objective": "Resolve canonical service identity from alert context and MCP discovery tools.",
+            "required_checks": ["alert_entities_reviewed", "canonical_service_selected"],
+            "allowed_tools": ["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"],
+            "completion_criteria": ["confidence_reported"],
+            "unknown_not_available_rules": ["missing_entity_context"],
+            "relevance_weights": {"alert": 1.0, "context_pack": 0.7},
+            "alias_priority_order": ["entity_ids", "explicit_service", "title", "summary"],
+            "alias_min_confidence": 0.72,
+            "summary_tiebreak_only": True,
+        },
+        WorkflowStageId.BUILD_INVESTIGATION_PLAN: {
+            "mission_objective": "Build bounded MCP-only plan aligned to service scope and investigation budgets.",
+            "required_checks": ["mcp_only_steps", "budget_limits_applied", "target_service_scoped"],
+            "allowed_tools": ["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"],
+            "completion_criteria": ["ordered_steps_present"],
+            "unknown_not_available_rules": ["no_invocable_tools"],
+            "relevance_weights": {"alert": 1.0, "context_pack": 0.7, "tool_catalog": 0.9},
+            "alias_priority_order": ["entity_ids", "explicit_service", "title", "summary"],
+            "alias_min_confidence": 0.72,
+            "summary_tiebreak_only": True,
+        },
+        WorkflowStageId.COLLECT_EVIDENCE: {
+            "mission_objective": "Collect read-only MCP evidence with team boundaries and citation coverage.",
+            "required_checks": ["team_execution_completed", "citations_created"],
+            "allowed_tools": ["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"],
+            "completion_criteria": ["evidence_items_collected"],
+            "unknown_not_available_rules": ["missing_required_signals"],
+            "relevance_weights": {"service_scoped": 1.0, "global": 0.6},
+        },
+        WorkflowStageId.SYNTHESIZE_RCA_REPORT: {
+            "mission_objective": "Arbitrate team mini RCAs and produce a final top-3 RCA with citations.",
+            "required_checks": ["top3_generated", "citations_attached"],
+            "allowed_tools": [],
+            "completion_criteria": ["likely_cause_present", "manual_actions_present"],
+            "unknown_not_available_rules": ["insufficient_citations"],
+            "relevance_weights": {"team_reports": 1.0, "raw_evidence": 0.9},
+        },
+        WorkflowStageId.EMIT_EVAL_EVENT: {
+            "mission_objective": "Emit eval and training artifacts for offline/online quality monitoring.",
+            "required_checks": ["latency_emitted", "citation_metrics_emitted"],
+            "allowed_tools": [],
+            "completion_criteria": ["eval_payload_valid"],
+            "unknown_not_available_rules": ["missing_eval_dimensions"],
+            "relevance_weights": {"metrics": 1.0, "training_artifacts": 0.8},
+        },
+    }
+    selected = defaults.get(
+        stage_id,
+        {
+            "mission_objective": f"Execute {stage_id.value} mission safely with citations.",
+            "required_checks": [],
+            "allowed_tools": [],
+            "completion_criteria": [],
+            "unknown_not_available_rules": [],
+            "relevance_weights": {},
+            "alias_priority_order": [],
+            "alias_min_confidence": 0.7,
+            "summary_tiebreak_only": True,
+        },
+    )
+    return StageMissionProfile(
+        tenant=tenant,
+        environment=environment,
+        stage_id=stage_id,
+        mission_objective=selected["mission_objective"],
+        required_checks=selected["required_checks"],
+        allowed_tools=selected["allowed_tools"],
+        completion_criteria=selected["completion_criteria"],
+        unknown_not_available_rules=selected["unknown_not_available_rules"],
+        relevance_weights=selected["relevance_weights"],
+        alias_priority_order=selected["alias_priority_order"],
+        alias_min_confidence=selected["alias_min_confidence"],
+        summary_tiebreak_only=selected["summary_tiebreak_only"],
+        updated_at=now,
+        updated_by=updated_by,
+    )
+
+
+def _default_team_mission(
+    tenant: str,
+    environment: str,
+    team_id: str,
+    updated_by: str,
+) -> TeamMissionProfile:
+    now = datetime.now(timezone.utc)
+    defaults: dict[str, dict[str, Any]] = {
+        "app": {
+            "mission_objective": "Investigate application failures using Jaeger traces and service operations.",
+            "required_checks": ["trace_errors_checked", "service_operations_reviewed"],
+            "allowed_tools": ["mcp.jaeger.*"],
+            "completion_criteria": ["mini_rca_produced"],
+            "unknown_not_available_rules": ["no_trace_evidence"],
+            "relevance_weights": {"service_scoped": 1.0, "global": 0.4},
+        },
+        "infra": {
+            "mission_objective": "Investigate infrastructure saturation, platform anomalies, and shared dependencies.",
+            "required_checks": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+            "allowed_tools": ["mcp.grafana.*", "mcp.prometheus.*"],
+            "completion_criteria": ["infra_completeness_reported"],
+            "unknown_not_available_rules": ["missing_required_checks", "missing_infra_signals"],
+            "relevance_weights": {"service_scoped": 1.0, "global": 0.8},
+            "evidence_requirements": [
+                {
+                    "evidence_class": "annotation_change_context",
+                    "description": "Check deployment, annotation, or maintenance context around the incident window.",
+                    "tool_patterns": ["mcp.grafana.get_annotations", "mcp.grafana.get_annotation_tags"],
+                    "query_scope": "change",
+                    "required_symptoms": [],
+                },
+                {
+                    "evidence_class": "local_service_metrics",
+                    "description": "Validate latency/error/throughput metrics for the resolved service.",
+                    "tool_patterns": ["mcp.prometheus.query_range", "mcp.prometheus.query_instant"],
+                    "query_scope": "service",
+                    "required_symptoms": ["latency", "resource", "memory", "cpu", "error"],
+                },
+                {
+                    "evidence_class": "global_shared_metrics",
+                    "description": "Validate whether the anomaly is shared across the platform or isolated to the service.",
+                    "tool_patterns": ["mcp.prometheus.query_range", "mcp.prometheus.query_instant"],
+                    "query_scope": "global",
+                    "required_symptoms": ["latency", "resource", "memory", "cpu", "error"],
+                },
+            ],
+            "symptom_overrides": {
+                "latency": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+                "resource": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+                "memory": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+                "cpu": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+                "error": ["annotation_change_context", "local_service_metrics", "global_shared_metrics"],
+            },
+        },
+        "db": {
+            "mission_objective": "Investigate datastore contention and query/connection health.",
+            "required_checks": ["db_signal_checked"],
+            "allowed_tools": [],
+            "completion_criteria": ["db_or_unknown_reported"],
+            "unknown_not_available_rules": ["no_db_tools_configured"],
+            "relevance_weights": {"service_scoped": 1.0, "global": 0.6},
+        },
+    }
+    selected = defaults.get(
+        team_id,
+        {
+            "mission_objective": f"Investigate {team_id} domain and report with citations.",
+            "required_checks": [],
+            "allowed_tools": [],
+            "completion_criteria": [],
+            "unknown_not_available_rules": [],
+            "relevance_weights": {},
+            "evidence_requirements": [],
+            "symptom_overrides": {},
+        },
+    )
+    return TeamMissionProfile(
+        team_id=team_id,
+        tenant=tenant,
+        environment=environment,
+        mission_objective=selected["mission_objective"],
+        required_checks=selected["required_checks"],
+        allowed_tools=selected["allowed_tools"],
+        completion_criteria=selected["completion_criteria"],
+        unknown_not_available_rules=selected["unknown_not_available_rules"],
+        relevance_weights=selected["relevance_weights"],
+        evidence_requirements=selected["evidence_requirements"],
+        symptom_overrides=selected["symptom_overrides"],
+        updated_at=now,
         updated_by=updated_by,
     )
 
@@ -370,6 +560,47 @@ async def _start_investigation_run(
     mcp_tools: list[dict] = []
     for mcp_server in store.list_mcp_servers(tenant=tenant, environment=environment):
         mcp_tools.extend([tool.model_dump(mode="json") for tool in store.get_mcp_tools(tenant, environment, mcp_server.server_id)])
+    investigation_teams = [
+        team.model_dump(mode="json")
+        for team in store.list_investigation_teams(tenant=tenant, environment=environment)
+    ]
+    stage_missions = {
+        profile.stage_id.value: profile.model_dump(mode="json")
+        for profile in store.list_stage_missions(tenant=tenant, environment=environment)
+    }
+    if not stage_missions:
+        defaults = [
+            _default_stage_mission(tenant, environment, WorkflowStageId.RESOLVE_SERVICE_IDENTITY, "system"),
+            _default_stage_mission(tenant, environment, WorkflowStageId.BUILD_INVESTIGATION_PLAN, "system"),
+            _default_stage_mission(tenant, environment, WorkflowStageId.COLLECT_EVIDENCE, "system"),
+            _default_stage_mission(tenant, environment, WorkflowStageId.SYNTHESIZE_RCA_REPORT, "system"),
+            _default_stage_mission(tenant, environment, WorkflowStageId.EMIT_EVAL_EVENT, "system"),
+        ]
+        for profile in defaults:
+            store.upsert_stage_mission(profile)
+        stage_missions = {
+            profile.stage_id.value: profile.model_dump(mode="json")
+            for profile in store.list_stage_missions(tenant=tenant, environment=environment)
+        }
+
+    team_missions = {
+        profile.team_id: profile.model_dump(mode="json")
+        for profile in store.list_team_missions(tenant=tenant, environment=environment)
+    }
+    if not team_missions:
+        defaults = [
+            _default_team_mission(tenant, environment, "app", "system"),
+            _default_team_mission(tenant, environment, "infra", "system"),
+            _default_team_mission(tenant, environment, "db", "system"),
+        ]
+        for profile in defaults:
+            store.upsert_team_mission(profile)
+        team_missions = {
+            profile.team_id: profile.model_dump(mode="json")
+            for profile in store.list_team_missions(tenant=tenant, environment=environment)
+        }
+
+    active_context_pack = store.get_active_context_pack(tenant=tenant, environment=environment)
 
     started_workflow_id, temporal_error = await start_investigation_workflow(
         investigation_id=investigation_id,
@@ -384,6 +615,10 @@ async def _start_investigation_run(
         agent_rollout_mode=rollout.mode.value,
         mcp_servers=mcp_servers,
         mcp_tools=mcp_tools,
+        investigation_teams=investigation_teams,
+        stage_missions=stage_missions,
+        team_missions=team_missions,
+        active_context_pack=active_context_pack.model_dump(mode="json") if active_context_pack else None,
         execution_policy="mcp_only",
     )
 
@@ -448,7 +683,7 @@ async def ingest_alert(
     now = datetime.now(timezone.utc)
     mcp_tools = store.list_all_mcp_tools(tenant=user.tenant, environment="prod")
     context = derive_argument_context(alert.model_dump(mode="json"), {})
-    default_allowlist = ["mcp.grafana.*", "mcp.jaeger.*"]
+    default_allowlist = ["mcp.grafana.*", "mcp.jaeger.*", "mcp.prometheus.*"]
     plan, _ = build_mcp_only_plan(
         investigation_id=investigation_id,
         tools=mcp_tools,
@@ -754,15 +989,13 @@ async def rerun_investigation(
 
 @app.post("/v1/catalog/mappings/upsert")
 def upsert_mapping(mapping: MappingUpsertRequest, _: None = Depends(require_api_key)) -> dict[str, str]:
-    key = (mapping.provider, mapping.provider_entity_id)
-    store.mappings[key] = mapping
+    store.upsert_mapping(mapping)
     return {"status": "ok", "canonical_service_id": mapping.canonical_service_id}
 
 
 @app.post("/v1/providers/llm")
 def upsert_llm_route(route: LlmProviderRoute, _: None = Depends(require_api_key)) -> dict[str, str]:
-    key = (route.tenant, route.environment)
-    store.llm_routes[key] = route
+    store.upsert_llm_route(route)
     return {"status": "ok", "tenant": route.tenant, "environment": route.environment}
 
 
@@ -860,7 +1093,6 @@ def upsert_llm_route_settings(
     _: None = Depends(require_api_key),
     user: UserContext = Depends(require_admin),
 ) -> dict[str, str]:
-    key = (route.tenant, route.environment)
     if route.tenant != user.tenant:
         raise HTTPException(status_code=403, detail="tenant mismatch")
     try:
@@ -873,7 +1105,7 @@ def upsert_llm_route_settings(
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid model route: {exc}") from exc
-    store.llm_routes[key] = route
+    store.upsert_llm_route(route)
     return {"status": "ok", "tenant": route.tenant, "environment": route.environment}
 
 
@@ -1020,6 +1252,230 @@ def upsert_agent_rollout(
         updated_by=user.user_id,
     )
     return store.upsert_agent_rollout(rollout)
+
+
+@app.get("/v1/settings/investigation-teams")
+def list_investigation_teams(
+    environment: str = "prod",
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(get_user_context),
+) -> dict[str, list[InvestigationTeamProfile]]:
+    teams = store.list_investigation_teams(tenant=user.tenant, environment=environment)
+    return {"items": teams}
+
+
+@app.put("/v1/settings/investigation-teams/{team_id}")
+def upsert_investigation_team(
+    team_id: str,
+    request: InvestigationTeamProfileUpsertRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> InvestigationTeamProfile:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+
+    profile = InvestigationTeamProfile(
+        team_id=team_id,
+        tenant=request.tenant,
+        environment=request.environment,
+        enabled=request.enabled,
+        objective_prompt=request.objective_prompt,
+        tool_allowlist=request.tool_allowlist,
+        max_tool_calls=request.max_tool_calls,
+        max_parallel_calls=request.max_parallel_calls,
+        timeout_seconds=request.timeout_seconds,
+        updated_at=datetime.now(timezone.utc),
+        updated_by=user.user_id,
+    )
+    return store.upsert_investigation_team(profile)
+
+
+@app.get("/v1/settings/stage-missions/{stage_id}")
+def get_stage_mission(
+    stage_id: WorkflowStageId,
+    environment: str = "prod",
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(get_user_context),
+) -> StageMissionProfile:
+    mission = store.get_stage_mission(user.tenant, environment, stage_id)
+    if mission:
+        return mission
+    default = _default_stage_mission(user.tenant, environment, stage_id, "system")
+    return store.upsert_stage_mission(default)
+
+
+@app.put("/v1/settings/stage-missions/{stage_id}")
+def upsert_stage_mission(
+    stage_id: WorkflowStageId,
+    request: StageMissionProfileUpsertRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> StageMissionProfile:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+    mission = StageMissionProfile(
+        tenant=request.tenant,
+        environment=request.environment,
+        stage_id=stage_id,
+        mission_objective=request.mission_objective,
+        required_checks=request.required_checks,
+        allowed_tools=request.allowed_tools,
+        completion_criteria=request.completion_criteria,
+        unknown_not_available_rules=request.unknown_not_available_rules,
+        relevance_weights=request.relevance_weights,
+        alias_priority_order=request.alias_priority_order,
+        alias_min_confidence=request.alias_min_confidence,
+        summary_tiebreak_only=request.summary_tiebreak_only,
+        updated_at=datetime.now(timezone.utc),
+        updated_by=user.user_id,
+    )
+    return store.upsert_stage_mission(mission)
+
+
+@app.get("/v1/settings/team-missions/{team_id}")
+def get_team_mission(
+    team_id: str,
+    environment: str = "prod",
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(get_user_context),
+) -> TeamMissionProfile:
+    mission = store.get_team_mission(user.tenant, environment, team_id)
+    if mission:
+        return mission
+    default = _default_team_mission(user.tenant, environment, team_id, "system")
+    return store.upsert_team_mission(default)
+
+
+@app.put("/v1/settings/team-missions/{team_id}")
+def upsert_team_mission(
+    team_id: str,
+    request: TeamMissionProfileUpsertRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> TeamMissionProfile:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+    mission = TeamMissionProfile(
+        team_id=team_id,
+        tenant=request.tenant,
+        environment=request.environment,
+        mission_objective=request.mission_objective,
+        required_checks=request.required_checks,
+        allowed_tools=request.allowed_tools,
+        completion_criteria=request.completion_criteria,
+        unknown_not_available_rules=request.unknown_not_available_rules,
+        relevance_weights=request.relevance_weights,
+        evidence_requirements=request.evidence_requirements,
+        symptom_overrides=request.symptom_overrides,
+        updated_at=datetime.now(timezone.utc),
+        updated_by=user.user_id,
+    )
+    return store.upsert_team_mission(mission)
+
+
+@app.get("/v1/settings/context-packs")
+def list_context_packs(
+    environment: str = "prod",
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(get_user_context),
+) -> dict[str, Any]:
+    packs = store.list_context_packs(user.tenant, environment=environment)
+    active = store.get_active_context_pack(user.tenant, environment=environment)
+    return {
+        "items": [pack.model_dump(mode="json") for pack in packs],
+        "active": active.model_dump(mode="json") if active else None,
+    }
+
+
+@app.post("/v1/settings/context-packs")
+def create_context_pack(
+    request: ContextPackCreateRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> ContextPack:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+    if not request.pack_id.strip():
+        raise HTTPException(status_code=400, detail="pack_id is required")
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    return store.create_context_pack(
+        tenant=request.tenant,
+        environment=request.environment,
+        pack_id=request.pack_id.strip(),
+        name=request.name.strip(),
+        description=request.description,
+        stage_bindings=request.stage_bindings,
+        team_bindings=request.team_bindings,
+        service_tags=request.service_tags,
+        infra_components=request.infra_components,
+        dependencies=request.dependencies,
+        validity_start=request.validity_start,
+        validity_end=request.validity_end,
+        updated_by=user.user_id,
+    )
+
+
+@app.post("/v1/settings/context-packs/{pack_id}/artifacts")
+def upload_context_pack_artifact(
+    pack_id: str,
+    request: ContextArtifactUploadRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> ContextPack:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+    if not pack_id.strip():
+        raise HTTPException(status_code=400, detail="pack_id is required")
+    allowed_types = {
+        "markdown",
+        "md",
+        "text",
+        "txt",
+        "json",
+        "yaml",
+        "yml",
+        "architecture_diagram",
+        "operator_notes",
+    }
+    artifact_type = request.artifact_type.strip().lower()
+    if artifact_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="unsupported artifact_type")
+    try:
+        return store.add_context_artifact(
+            tenant=request.tenant,
+            environment=request.environment,
+            pack_id=pack_id,
+            filename=request.filename.strip() or f"{artifact_type}-{uuid4()}",
+            artifact_type=artifact_type,
+            media_type=request.media_type,
+            content=request.content,
+            operator_notes=request.operator_notes,
+            metadata=request.metadata,
+            updated_by=user.user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/settings/context-packs/{pack_id}/activate")
+def activate_context_pack(
+    pack_id: str,
+    request: ContextPackActivateRequest,
+    _: None = Depends(require_api_key),
+    user: UserContext = Depends(require_admin),
+) -> ContextPack:
+    if request.tenant != user.tenant:
+        raise HTTPException(status_code=403, detail="tenant mismatch")
+    try:
+        return store.activate_context_pack(
+            tenant=request.tenant,
+            environment=request.environment,
+            pack_id=pack_id,
+            version=request.version,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/v1/ui/workflow-layouts/{workflow_key}")

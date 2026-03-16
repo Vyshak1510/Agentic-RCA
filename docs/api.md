@@ -33,6 +33,16 @@
 - `PUT /v1/settings/agent-prompts/{stage_id}`
 - `GET /v1/settings/agent-rollout`
 - `PUT /v1/settings/agent-rollout`
+- `GET /v1/settings/investigation-teams`
+- `PUT /v1/settings/investigation-teams/{team_id}`
+- `GET /v1/settings/stage-missions/{stage_id}`
+- `PUT /v1/settings/stage-missions/{stage_id}`
+- `GET /v1/settings/team-missions/{team_id}`
+- `PUT /v1/settings/team-missions/{team_id}`
+- `GET /v1/settings/context-packs`
+- `POST /v1/settings/context-packs`
+- `POST /v1/settings/context-packs/{pack_id}/artifacts`
+- `POST /v1/settings/context-packs/{pack_id}/activate`
 
 ### LLM Route Validation
 
@@ -43,9 +53,36 @@
 
 ### MCP Tool Descriptor Metadata
 
-- `GET /v1/settings/mcp-servers/{server_id}/tools` now returns MCP schema-derived fields:
+- `GET /v1/settings/mcp-servers/{server_id}/tools` now returns MCP schema-derived fields plus execution-policy enrichment:
   - `arg_keys`
   - `required_args`
+  - `phase`
+  - `scope_kind`
+  - `requires_artifacts`
+  - `produces_artifacts`
+  - `default_priority`
+  - `result_adapter`
+
+### Team-Agent Evidence Metadata
+
+- `collect_evidence` stage metadata includes:
+  - `team_reports` (`TeamRcaDraft[]`)
+  - `team_execution` (`TeamExecutionSummary[]`)
+  - `artifact_state`
+  - `resolved_aliases`
+  - `blocked_tools`
+  - `invocable_tools`
+  - `mission_id`
+  - `mission_checklist`
+  - `context_refs`
+  - `unknown_not_available_reasons`
+  - `relevance_weights`
+- `synthesize_rca_report` stage metadata includes:
+  - `arbitration_conflicts`
+  - `arbitration_decision_trace`
+  - `team_reports`
+  - `team_execution`
+  - mission/context metadata (`mission_id`, `mission_checklist`, `context_refs`)
 
 ## UI State
 

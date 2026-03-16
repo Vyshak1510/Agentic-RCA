@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
+from platform_core.mcp_execution import enrich_tool_descriptors
 from platform_core.models import McpServerConfig, McpToolDescriptor
 
 
@@ -16,6 +18,20 @@ class McpClientError(RuntimeError):
 
 def _base_url(url: str) -> str:
     return url.rstrip("/")
+
+
+def _streamable_base_urls(url: str) -> list[str]:
+    base = _base_url(url)
+    candidates = [base]
+    parsed = urlparse(base)
+    path = (parsed.path or "").rstrip("/")
+    if not path.endswith("/mcp"):
+        candidates.append(f"{base}/mcp")
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
 
 
 def _build_client(timeout: int) -> httpx.Client:
@@ -202,7 +218,8 @@ def _is_auth_failure(exc: Exception) -> bool:
 class _StreamableHttpSession:
     def __init__(self, config: McpServerConfig) -> None:
         self._config = config
-        self._base_url = _base_url(config.base_url)
+        self._base_urls = _streamable_base_urls(config.base_url)
+        self._active_base_url = self._base_urls[0]
         self._protocol_version = os.getenv("MCP_PROTOCOL_VERSION", "2025-06-18")
         self._session_id: str | None = None
 
@@ -217,13 +234,43 @@ class _StreamableHttpSession:
             headers["Mcp-Session-Id"] = self._session_id
         return headers
 
+    def _candidate_urls(self) -> list[str]:
+        return [self._active_base_url, *[url for url in self._base_urls if url != self._active_base_url]]
+
     def _post(self, client: httpx.Client, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        response = client.post(self._base_url, json=payload, headers=self._headers())
-        response.raise_for_status()
-        session_id = response.headers.get("Mcp-Session-Id")
-        if session_id:
-            self._session_id = session_id
-        return _extract_jsonrpc_message_payloads(response)
+        last_error: Exception | None = None
+        candidates = self._candidate_urls()
+        for index, endpoint in enumerate(candidates):
+            is_last = index == len(candidates) - 1
+            try:
+                response = client.post(endpoint, json=payload, headers=self._headers())
+            except Exception as exc:
+                last_error = exc
+                if is_last:
+                    raise
+                continue
+
+            if response.status_code in {404, 405} and not is_last:
+                last_error = McpClientError(
+                    f"MCP endpoint {endpoint} responded {response.status_code}; trying alternate endpoint."
+                )
+                continue
+
+            response.raise_for_status()
+            session_id = response.headers.get("Mcp-Session-Id")
+            if session_id:
+                self._session_id = session_id
+            self._active_base_url = endpoint
+
+            try:
+                return _extract_jsonrpc_message_payloads(response)
+            except Exception as exc:
+                last_error = exc
+                if is_last:
+                    raise
+        if last_error:
+            raise McpClientError(f"MCP request failed: {last_error}") from last_error
+        raise McpClientError("MCP request failed without a response.")
 
     @staticmethod
     def _result_for_id(payloads: list[dict[str, Any]], request_id: str, method: str) -> Any:
@@ -345,7 +392,7 @@ def _discover_tools_via_mcp(config: McpServerConfig) -> list[McpToolDescriptor]:
                 required_args=required_args,
             )
         )
-    return tools
+    return enrich_tool_descriptors(tools)
 
 
 def _invoke_tool_via_mcp(config: McpServerConfig, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -357,7 +404,15 @@ def _invoke_tool_via_mcp(config: McpServerConfig, tool_name: str, arguments: dic
 
     if isinstance(result, dict):
         if _coerce_bool(result.get("isError"), False):
-            raise McpClientError(f"MCP tool {tool_name} returned isError=true")
+            detail = ""
+            content = result.get("content")
+            if isinstance(content, list) and content:
+                first = content[0]
+                if isinstance(first, dict):
+                    text = first.get("text")
+                    if isinstance(text, str) and text.strip():
+                        detail = f": {text.strip()[:240]}"
+            raise McpClientError(f"MCP tool {tool_name} returned isError=true{detail}")
         return result
     return {"result": result}
 
@@ -415,7 +470,7 @@ def _discover_tools_legacy(config: McpServerConfig) -> list[McpToolDescriptor]:
                 required_args=required_args,
             )
         )
-    return tools
+    return enrich_tool_descriptors(tools)
 
 
 def _invoke_tool_legacy(config: McpServerConfig, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -471,6 +526,17 @@ def discover_mcp_tools(config: McpServerConfig) -> list[McpToolDescriptor]:
 def invoke_mcp_tool(config: McpServerConfig, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         return _invoke_tool_via_mcp(config, tool_name, arguments)
+    except McpClientError as mcp_exc:
+        # Tool-level errors from MCP should not fall back to legacy endpoints.
+        # Fallback here only adds noise and does not fix missing/invalid args.
+        if "returned isError=true" in str(mcp_exc):
+            raise
+        try:
+            return _invoke_tool_legacy(config, tool_name, arguments)
+        except Exception as legacy_exc:
+            raise McpClientError(
+                f"MCP invoke failed for {tool_name}: {mcp_exc}; legacy fallback failed: {legacy_exc}"
+            ) from legacy_exc
     except Exception as mcp_exc:
         try:
             return _invoke_tool_legacy(config, tool_name, arguments)

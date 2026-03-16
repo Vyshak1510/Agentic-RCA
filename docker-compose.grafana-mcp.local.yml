@@ -4,7 +4,7 @@ services:
     container_name: grafana-mcp
     command: ["-t", "streamable-http", "-address", "0.0.0.0:8000"]
     environment:
-      GRAFANA_URL: ${GRAFANA_URL:-http://host.docker.internal:8080/grafana}
+      GRAFANA_URL: ${GRAFANA_MCP_TARGET_URL:-http://host.docker.internal:3000}
       GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}
       GRAFANA_ORG_ID: ${GRAFANA_ORG_ID:-1}
     ports:

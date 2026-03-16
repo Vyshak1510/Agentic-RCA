@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .venv/
+.venv-test/
 venv/
 
 # Build
@@ -24,6 +25,7 @@ dist/
 *.log
 coverage.xml
 htmlcov/
+.data/
 
 # Node
 node_modules/

@@ -5,7 +5,7 @@ services:
       dockerfile: third_party/jaeger-mcp/Dockerfile
     container_name: jaeger-mcp
     environment:
-      JAEGER_BASE_URL: ${JAEGER_BASE_URL:-http://host.docker.internal:50734}
+      JAEGER_BASE_URL: ${JAEGER_MCP_TARGET_URL:-http://host.docker.internal:16686}
       JAEGER_API_PREFIX: ${JAEGER_API_PREFIX:-/jaeger/ui/api}
       JAEGER_TIMEOUT_SECONDS: ${JAEGER_TIMEOUT_SECONDS:-10}
     ports:

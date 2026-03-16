@@ -9,10 +9,13 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.13.22",
     "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
     "next": "14.2.32",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "react-resizable-panels": "^4.7.2",
     "reactflow": "^11.11.4"
   },
   "devDependencies": {

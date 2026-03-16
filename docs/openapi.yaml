@@ -248,7 +248,7 @@ paths:
           description: MCP connectivity test result
   /v1/settings/mcp-servers/{server_id}/tools:
     get:
-      summary: List discovered MCP tools for server (includes arg_keys and required_args)
+      summary: List discovered MCP tools for server (includes schema and execution-profile metadata)
       parameters:
         - name: server_id
           in: path
@@ -287,6 +287,105 @@ paths:
       responses:
         '200':
           description: Agent rollout upsert response
+  /v1/settings/investigation-teams:
+    get:
+      summary: List investigation team profiles
+      responses:
+        '200':
+          description: Investigation team profile list
+  /v1/settings/investigation-teams/{team_id}:
+    put:
+      summary: Upsert investigation team profile
+      parameters:
+        - name: team_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Investigation team profile upsert response
+  /v1/settings/stage-missions/{stage_id}:
+    get:
+      summary: Get stage mission profile
+      parameters:
+        - name: stage_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Stage mission profile
+    put:
+      summary: Upsert stage mission profile
+      parameters:
+        - name: stage_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Stage mission upsert response
+  /v1/settings/team-missions/{team_id}:
+    get:
+      summary: Get team mission profile
+      parameters:
+        - name: team_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Team mission profile
+    put:
+      summary: Upsert team mission profile
+      parameters:
+        - name: team_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Team mission upsert response
+  /v1/settings/context-packs:
+    get:
+      summary: List context packs and active pack
+      responses:
+        '200':
+          description: Context pack list
+    post:
+      summary: Create context pack (versioned)
+      responses:
+        '200':
+          description: Context pack created
+  /v1/settings/context-packs/{pack_id}/artifacts:
+    post:
+      summary: Upload context artifact and create next pack version
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Context pack updated with artifact
+  /v1/settings/context-packs/{pack_id}/activate:
+    post:
+      summary: Activate context pack version for tenant/environment
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Context pack activation response
   /v1/ui/workflow-layouts/{workflow_key}:
     get:
       summary: Get persisted workflow mapper layout for user
@@ -374,3 +473,105 @@ components:
           type: string
         raw_payload:
           type: object
+    InvestigationTeamProfile:
+      type: object
+      required:
+        - team_id
+        - tenant
+        - environment
+        - enabled
+        - objective_prompt
+        - tool_allowlist
+        - max_tool_calls
+        - max_parallel_calls
+        - timeout_seconds
+      properties:
+        team_id:
+          type: string
+        tenant:
+          type: string
+        environment:
+          type: string
+        enabled:
+          type: boolean
+        objective_prompt:
+          type: string
+        tool_allowlist:
+          type: array
+          items:
+            type: string
+        max_tool_calls:
+          type: integer
+        max_parallel_calls:
+          type: integer
+        timeout_seconds:
+          type: integer
+    TeamRcaDraft:
+      type: object
+      required:
+        - team_id
+        - status
+        - summary
+      properties:
+        team_id:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        confidence:
+          type: number
+        supporting_citations:
+          type: array
+          items:
+            type: string
+        unknowns:
+          type: array
+          items:
+            type: string
+    TeamExecutionSummary:
+      type: object
+      required:
+        - team_id
+        - status
+      properties:
+        team_id:
+          type: string
+        status:
+          type: string
+        selected_tools:
+          type: array
+          items:
+            type: string
+        executed_tool_count:
+          type: integer
+        failed_tool_count:
+          type: integer
+        evidence_count:
+          type: integer
+        duration_ms:
+          type: integer
+        citations:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+          nullable: true
+    CommanderArbitrationSummary:
+      type: object
+      required:
+        - selected_team_ids
+        - arbitration_conflicts
+        - arbitration_decision_trace
+      properties:
+        selected_team_ids:
+          type: array
+          items:
+            type: string
+        arbitration_conflicts:
+          type: array
+          items:
+            type: string
+        arbitration_decision_trace:
+          type: string

@@ -43,6 +43,26 @@ def _completion_message(stage_id: WorkflowStageId, result: Any) -> str:
     return f"{stage_id.value} completed"
 
 
+def _attach_mission_metadata(base: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    for key in (
+        "mission_id",
+        "mission_checklist",
+        "context_refs",
+        "unknown_not_available_reasons",
+        "relevance_weights",
+        "alias_decision_trace",
+        "rerun_directives",
+        "stage_eval_records",
+        "effective_prompt_snapshot",
+        "effective_mission_snapshot",
+        "effective_team_mission_snapshots",
+        "effective_tool_catalog_summary",
+    ):
+        if key in result:
+            base[key] = result.get(key)
+    return base
+
+
 def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
@@ -71,7 +91,15 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             metadata["tool_traces"] = result.get("tool_traces")
         if result.get("skipped_tools"):
             metadata["skipped_tools"] = result.get("skipped_tools")
-        return metadata
+        if result.get("artifact_state"):
+            metadata["artifact_state"] = result.get("artifact_state")
+        if result.get("resolved_aliases"):
+            metadata["resolved_aliases"] = result.get("resolved_aliases")
+        if result.get("blocked_tools"):
+            metadata["blocked_tools"] = result.get("blocked_tools")
+        if result.get("invocable_tools"):
+            metadata["invocable_tools"] = result.get("invocable_tools")
+        return _attach_mission_metadata(metadata, result)
     if stage_id == WorkflowStageId.BUILD_INVESTIGATION_PLAN:
         metadata = {
             "step_count": len(result.get("ordered_steps", [])),
@@ -97,22 +125,40 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             metadata["tool_traces"] = result.get("tool_traces")
         if result.get("skipped_tools"):
             metadata["skipped_tools"] = result.get("skipped_tools")
-        return metadata
+        if result.get("artifact_state"):
+            metadata["artifact_state"] = result.get("artifact_state")
+        if result.get("resolved_aliases"):
+            metadata["resolved_aliases"] = result.get("resolved_aliases")
+        if result.get("blocked_tools"):
+            metadata["blocked_tools"] = result.get("blocked_tools")
+        if result.get("invocable_tools"):
+            metadata["invocable_tools"] = result.get("invocable_tools")
+        return _attach_mission_metadata(metadata, result)
     if stage_id == WorkflowStageId.COLLECT_EVIDENCE:
         executed_steps = int(result.get("executed_steps") or 0)
         evidence_count = len(result.get("evidence", []))
-        return {
+        metadata = {
             "executed_steps": executed_steps,
             "stopped_early": result.get("stopped_early"),
             "evidence_count": evidence_count,
             "evidence": result.get("evidence", []),
             "execution_trace": result.get("execution_trace", []),
             "skipped_tools": result.get("skipped_tools", []),
+            "team_reports": result.get("team_reports", []),
+            "team_execution": result.get("team_execution", []),
+            "artifact_state": result.get("artifact_state", {}),
+            "resolved_aliases": result.get("resolved_aliases", []),
+            "blocked_tools": result.get("blocked_tools", []),
+            "invocable_tools": result.get("invocable_tools", []),
             "stage_reasoning_summary": (
-                f"Executed {executed_steps} collection step(s), produced {evidence_count} evidence item(s), "
-                f"early_stop={bool(result.get('stopped_early'))}."
+                result.get("stage_reasoning_summary")
+                or (
+                    f"Executed {executed_steps} collection step(s), produced {evidence_count} evidence item(s), "
+                    f"early_stop={bool(result.get('stopped_early'))}."
+                )
             ),
         }
+        return _attach_mission_metadata(metadata, result)
     if stage_id == WorkflowStageId.SYNTHESIZE_RCA_REPORT:
         report = result.get("report", {})
         llm_summary = result.get("llm_summary")
@@ -120,7 +166,7 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             reasoning = llm_summary.strip()
         else:
             reasoning = "Synthesized hypotheses from normalized evidence and ranked supporting citations."
-        return {
+        metadata = {
             "llm_model_used": result.get("llm_model_used"),
             "requested_model": result.get("requested_model"),
             "resolved_model": result.get("resolved_model"),
@@ -129,9 +175,14 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
             "confidence": report.get("confidence") if isinstance(report, dict) else None,
             "report": report if isinstance(report, dict) else {},
             "hypotheses": result.get("hypotheses", []),
+            "team_reports": result.get("team_reports", []),
+            "team_execution": result.get("team_execution", []),
+            "arbitration_conflicts": result.get("arbitration_conflicts", []),
+            "arbitration_decision_trace": result.get("arbitration_decision_trace"),
             "synthesis_trace": result.get("synthesis_trace", {}),
             "stage_reasoning_summary": reasoning,
         }
+        return _attach_mission_metadata(metadata, result)
     if stage_id == WorkflowStageId.PUBLISH_REPORT:
         published = bool(result.get("published"))
         return {
@@ -149,7 +200,7 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
         top_count = result.get("top_hypothesis_count")
         citation_count = result.get("citation_count")
         latency_seconds = result.get("latency_seconds")
-        return {
+        metadata = {
             "top_hypothesis_count": top_count,
             "citation_count": citation_count,
             "evidence_count": result.get("evidence_count"),
@@ -160,6 +211,7 @@ def _metadata(stage_id: WorkflowStageId, result: Any) -> dict[str, Any]:
                 f"Eval event emitted with top_hypotheses={top_count}, citations={citation_count}, latency={latency_seconds}s."
             ),
         }
+        return _attach_mission_metadata(metadata, result)
 
     return {}
 
@@ -219,7 +271,9 @@ async def _execute_with_progress(
     fn: Callable[..., Any],
     args: tuple[Any, ...],
 ) -> Any:
-    attempt = _attempt_number()
+    stage_attempt_overrides = run_context.get("stage_attempt_overrides", {}) if isinstance(run_context, dict) else {}
+    override_attempt = stage_attempt_overrides.get(stage_id.value) if isinstance(stage_attempt_overrides, dict) else None
+    attempt = int(override_attempt or _attempt_number())
     await report_stage_event(
         run_context=run_context,
         stage_id=stage_id,
@@ -299,12 +353,13 @@ async def synthesize_report_activity(
     alert_payload: dict[str, Any],
     service_identity_payload: dict[str, Any],
     evidence_payload: list[dict[str, Any]],
+    collect_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return await _execute_with_progress(
         stage_id=WorkflowStageId.SYNTHESIZE_RCA_REPORT,
         run_context=run_context,
         fn=synthesize_report_stage,
-        args=(alert_payload, service_identity_payload, evidence_payload, run_context),
+        args=(alert_payload, service_identity_payload, evidence_payload, run_context, collect_result),
     )
 
 
@@ -335,7 +390,7 @@ async def emit_eval_event_activity(
         stage_id=WorkflowStageId.EMIT_EVAL_EVENT,
         run_context=run_context,
         fn=emit_eval_event_stage,
-        args=(investigation_id, report_payload, evidence_payload, latency_seconds),
+        args=(investigation_id, report_payload, evidence_payload, latency_seconds, run_context),
     )
 
 

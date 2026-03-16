@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: setup test lint run-ingest run-analysis run-eval run-orchestrator-worker run-orchestrator-demo web-install web-dev compose-up compose-down compose-logs compose-up-grafana-mcp compose-down-grafana-mcp compose-up-jaeger-mcp compose-down-jaeger-mcp compose-up-all-mcp compose-down-all-mcp bootstrap-local-mcp
+.PHONY: setup test lint run-ingest run-analysis run-eval run-orchestrator-worker run-orchestrator-demo web-install web-dev compose-up compose-down compose-logs compose-ps compose-restart-web compose-up-grafana-mcp compose-down-grafana-mcp compose-up-jaeger-mcp compose-down-jaeger-mcp compose-up-prometheus-mcp compose-down-prometheus-mcp compose-up-all-mcp compose-down-all-mcp bootstrap-local-mcp
 
 setup:
 	$(PYTHON) -m pip install -e .[dev]
@@ -33,7 +33,7 @@ web-dev:
 	cd services/web-ui && npm run dev
 
 compose-up:
-	docker compose -f docker-compose.local.yml up -d --build
+	docker compose -f docker-compose.local.yml up -d --build --remove-orphans
 
 compose-down:
 	docker compose -f docker-compose.local.yml down
@@ -41,23 +41,35 @@ compose-down:
 compose-logs:
 	docker compose -f docker-compose.local.yml logs -f --tail=200
 
+compose-ps:
+	docker compose -f docker-compose.local.yml ps
+
+compose-restart-web:
+	docker compose -f docker-compose.local.yml restart web-ui
+
 compose-up-grafana-mcp:
-	docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml up -d --build grafana-mcp
+	. ./scripts/detect_local_demo_targets.sh && docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml up -d --build grafana-mcp
 
 compose-down-grafana-mcp:
 	docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml down grafana-mcp
 
 compose-up-jaeger-mcp:
-	docker compose -f docker-compose.local.yml -f docker-compose.jaeger-mcp.local.yml up -d --build jaeger-mcp
+	. ./scripts/detect_local_demo_targets.sh && docker compose -f docker-compose.local.yml -f docker-compose.jaeger-mcp.local.yml up -d --build jaeger-mcp
 
 compose-down-jaeger-mcp:
 	docker compose -f docker-compose.local.yml -f docker-compose.jaeger-mcp.local.yml down jaeger-mcp
 
+compose-up-prometheus-mcp:
+	. ./scripts/detect_local_demo_targets.sh && docker compose -f docker-compose.local.yml -f docker-compose.prometheus-mcp.local.yml up -d --build prometheus-mcp
+
+compose-down-prometheus-mcp:
+	docker compose -f docker-compose.local.yml -f docker-compose.prometheus-mcp.local.yml down prometheus-mcp
+
 compose-up-all-mcp:
-	docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml -f docker-compose.jaeger-mcp.local.yml up -d --build grafana-mcp jaeger-mcp
+	. ./scripts/detect_local_demo_targets.sh && docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml -f docker-compose.jaeger-mcp.local.yml -f docker-compose.prometheus-mcp.local.yml up -d --build grafana-mcp jaeger-mcp prometheus-mcp
 
 compose-down-all-mcp:
-	docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml -f docker-compose.jaeger-mcp.local.yml down grafana-mcp jaeger-mcp
+	docker compose -f docker-compose.local.yml -f docker-compose.grafana-mcp.local.yml -f docker-compose.jaeger-mcp.local.yml -f docker-compose.prometheus-mcp.local.yml down grafana-mcp jaeger-mcp prometheus-mcp
 
 bootstrap-local-mcp:
 	./scripts/bootstrap_local_mcp_servers.sh

@@ -2,25 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
 
 from platform_core.llm_router import ModelRoute, resolve_model_alias, summarize_with_model_route
 from platform_core.mcp_client import invoke_mcp_tool
+from platform_core.mcp_execution import (
+    blocked_tool_entries,
+    extract_artifact_update,
+    invocable_tool_names,
+    merge_artifact_state,
+    resolve_service_aliases,
+    seed_artifact_state,
+)
 from platform_core.mcp_planning import build_mcp_only_plan, derive_argument_context, select_mcp_tools
 from platform_core.models import (
     AgentPromptProfile,
     AgentToolTrace,
     AlertEnvelope,
+    ArtifactState,
     InvestigationPlan,
     McpServerConfig,
     McpToolDescriptor,
     ServiceIdentity,
 )
 from platform_core.policy import enforce_budget_policy
-from platform_core.resolver import resolve_service_identity
 
 
 @dataclass
@@ -34,6 +43,10 @@ class AgentExecutionResult:
     requested_model: dict[str, str]
     resolved_model: dict[str, str]
     model_error: str | None = None
+    artifact_state: dict[str, Any] | None = None
+    resolved_aliases: list[dict[str, Any]] | None = None
+    blocked_tools: list[dict[str, Any]] | None = None
+    invocable_tools: list[str] | None = None
 
 
 def _sanitize_value(value: Any) -> Any:
@@ -79,6 +92,109 @@ def _dedupe_skipped_tools(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return deduped
 
 
+def _parse_time_like(value: Any, *, now: datetime | None = None) -> datetime | None:
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1_000_000_000_000:
+            ts = ts / 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    lowered = text.lower().replace(" ", "")
+    if lowered == "now":
+        return now
+
+    relative = re.fullmatch(r"now([+-])(\d+)([smhd])", lowered)
+    if relative:
+        sign, amount_text, unit = relative.groups()
+        amount = int(amount_text)
+        if unit == "s":
+            delta = timedelta(seconds=amount)
+        elif unit == "m":
+            delta = timedelta(minutes=amount)
+        elif unit == "h":
+            delta = timedelta(hours=amount)
+        else:
+            delta = timedelta(days=amount)
+        return now - delta if sign == "-" else now + delta
+
+    if lowered.isdigit():
+        return _parse_time_like(int(lowered), now=now)
+
+    iso_candidate = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(iso_candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalize_tool_arguments(descriptor: McpToolDescriptor, arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments or {})
+    server = descriptor.server_id.lower()
+    tool = descriptor.tool_name.lower()
+    now = datetime.now(timezone.utc)
+
+    # Grafana annotations API expects epoch milliseconds for From/To.
+    if server == "grafana" and tool == "get_annotations":
+        for key in list(normalized.keys()):
+            if key.lower() not in {"from", "to"}:
+                continue
+            parsed = _parse_time_like(normalized[key], now=now)
+            if parsed:
+                normalized[key] = int(parsed.timestamp() * 1000)
+
+    # Some Grafana MCP analytical tools expect absolute RFC3339 start/end timestamps.
+    if server == "grafana" and tool in {"find_slow_requests", "find_error_logs", "find_slow_db_queries"}:
+        for key in list(normalized.keys()):
+            if key.lower() not in {"start", "end"}:
+                continue
+            parsed = _parse_time_like(normalized[key], now=now)
+            if parsed:
+                normalized[key] = parsed.isoformat().replace("+00:00", "Z")
+
+    # Jaeger search API rejects plain service-name strings in `tags`.
+    # Keep only structured/kv forms; otherwise omit optional tags.
+    if server == "jaeger":
+        for key in list(normalized.keys()):
+            if key.lower() != "tags":
+                continue
+            value = normalized[key]
+            if isinstance(value, dict):
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if text and ("=" in text or (text.startswith("{") and text.endswith("}"))):
+                    normalized[key] = text
+                    continue
+                normalized.pop(key, None)
+                continue
+            if isinstance(value, list):
+                pairs = [item.strip() for item in value if isinstance(item, str) and "=" in item]
+                if pairs:
+                    normalized[key] = ",".join(pairs)
+                else:
+                    normalized.pop(key, None)
+                continue
+            normalized.pop(key, None)
+
+    return normalized
+
+
 def _server_map(mcp_servers: list[McpServerConfig] | None) -> dict[str, McpServerConfig]:
     servers: dict[str, McpServerConfig] = {}
     for server in mcp_servers or []:
@@ -114,12 +230,13 @@ def _execute_mcp_tool(
     timer = perf_counter()
     fqdn = f"mcp.{descriptor.server_id}.{descriptor.tool_name}"
     error: str | None = None
+    normalized_arguments = _normalize_tool_arguments(descriptor, arguments)
 
     try:
         server = servers.get(descriptor.server_id)
         if not server:
             raise ValueError(f"MCP server unavailable: {descriptor.server_id}")
-        result = invoke_mcp_tool(server, descriptor.tool_name, arguments)
+        result = invoke_mcp_tool(server, descriptor.tool_name, normalized_arguments)
         success = True
     except Exception as exc:
         success = False
@@ -135,7 +252,7 @@ def _execute_mcp_tool(
         ended_at=ended,
         duration_ms=int((perf_counter() - timer) * 1000),
         success=success,
-        args_summary=_sanitize_value(arguments),
+        args_summary=_sanitize_value(normalized_arguments),
         result_summary=_sanitize_value(result),
         error=error,
         citations=[],
@@ -159,7 +276,13 @@ def _planner_objective(profile: AgentPromptProfile, alert: AlertEnvelope) -> str
         f"{profile.system_prompt}\n"
         f"Objective: {objective}\n"
         "Constraints: planning stage allows MCP light probes only; do not fetch deep evidence.\n"
-        "Goal: produce a bounded MCP-only investigation plan that helps fix the alert manually."
+        "Goal: produce a bounded MCP-only investigation plan that helps fix the alert manually.\n"
+        "If the current service scope or evidence preconditions are insufficient, append optional rerun fields:\n"
+        "RERUN_STAGE: <resolve_service_identity|build_investigation_plan>\n"
+        "RERUN_REASON: <why current scope/plan is insufficient>\n"
+        "RERUN_OBJECTIVE: <what the rerun should discover>\n"
+        "RERUN_EVIDENCE: <missing artifact or evidence class>\n"
+        "RERUN_TOOL_FOCUS: <comma-separated tool names>"
     )
 
 
@@ -172,7 +295,8 @@ def run_resolver_agent(
     mcp_tools: list[McpToolDescriptor] | None = None,
 ) -> AgentExecutionResult:
     alert = AlertEnvelope.model_validate(alert_payload)
-    context = derive_argument_context(alert_payload, {})
+    artifact_state = seed_artifact_state(alert_payload, {})
+    context = derive_argument_context(alert_payload, {}, artifact_state)
     servers = _server_map(mcp_servers)
     requested_model = {"primary": model_route.primary, "fallback": model_route.fallback}
 
@@ -183,25 +307,41 @@ def run_resolver_agent(
         max_tools=max(1, min(prompt_profile.max_tool_calls, 4)),
         mode="discovery",
         light_probe_only=True,
+        artifact_state=artifact_state,
+        alert_payload=alert_payload,
     )
 
     traces: list[AgentToolTrace] = []
     for planned_tool in selected_tools:
-        _, trace = _execute_mcp_tool(servers, planned_tool.descriptor, planned_tool.arguments)
+        result, trace = _execute_mcp_tool(servers, planned_tool.descriptor, planned_tool.arguments)
         traces.append(trace)
+        artifact_state = merge_artifact_state(artifact_state, extract_artifact_update(planned_tool.descriptor, result))
 
-    entities = list(dict.fromkeys(alert.entity_ids))
-    if entities:
-        nr_candidates = entities
-    else:
-        nr_candidates = ["unknown-service"]
+    artifact_state, resolved_aliases = resolve_service_aliases(artifact_state)
 
-    identity = resolve_service_identity(
-        alert=alert,
-        nr_candidates=nr_candidates,
-        azure_candidates=[],
-        cmdb_candidates=[],
-        rag_candidates=[],
+    candidate_pool = list(dict.fromkeys([*artifact_state.service_candidates, *artifact_state.metric_service_candidates]))
+    alias_trace = artifact_state.alias_decision_trace
+    resolved_service = str(artifact_state.resolved_service or "").strip()
+    has_alias_resolution = bool(alias_trace and alias_trace.selected_candidate and resolved_service)
+    canonical_service_id = resolved_service if has_alias_resolution else "unknown"
+    ambiguous = candidate_pool[:3] if not has_alias_resolution else [candidate for candidate in candidate_pool if candidate != canonical_service_id][:3]
+    alias_confidence = alias_trace.confidence if alias_trace and has_alias_resolution else 0.0
+    identity = ServiceIdentity(
+        canonical_service_id=canonical_service_id,
+        owner=alert.raw_payload.get("owner"),
+        env=str(alert.raw_payload.get("env", "prod")),
+        dependency_graph_refs=[str(item) for item in alert.raw_payload.get("deps", []) if isinstance(item, str)],
+        mapped_provider_ids=(
+            {
+                "primary": canonical_service_id,
+                **({"jaeger": canonical_service_id} if any(tool.server_id == "jaeger" for tool in (mcp_tools or [])) else {}),
+                **({"prometheus": canonical_service_id} if any(tool.server_id == "prometheus" for tool in (mcp_tools or [])) else {}),
+            }
+            if has_alias_resolution
+            else {}
+        ),
+        confidence=max(0.0, min(alias_confidence, 0.99)),
+        ambiguous_candidates=ambiguous,
     )
 
     objective = _resolver_objective(prompt_profile, alert)
@@ -213,11 +353,20 @@ def run_resolver_agent(
         llm_summary = f"model_error: {exc}"
         model_error = str(exc)
         resolved_model = {}
-    reasoning = (
-        f"Model {model_used} resolved service identity from alert context using {len(traces)} MCP probe(s); "
-        f"skipped {len(skipped_tools)} tool(s) with unmet requirements; "
-        f"selected {identity.canonical_service_id} with confidence {identity.confidence:.2f}."
-    )
+    if has_alias_resolution:
+        reasoning = (
+            f"Model {model_used} resolved service identity from alert context using {len(traces)} MCP probe(s); "
+            f"skipped {len(skipped_tools)} tool(s) with unmet requirements; "
+            f"selected {identity.canonical_service_id} with confidence {identity.confidence:.2f} "
+            f"after discovering {len(candidate_pool)} telemetry service candidate(s)."
+        )
+    else:
+        unresolved_reason = alias_trace.unresolved_reason if alias_trace else "alias_resolution_missing"
+        reasoning = (
+            f"Model {model_used} could not resolve a canonical service identity after {len(traces)} MCP probe(s); "
+            f"skipped {len(skipped_tools)} tool(s) with unmet requirements; "
+            f"discovered {len(candidate_pool)} telemetry service candidate(s); unresolved_reason={unresolved_reason}."
+        )
 
     return AgentExecutionResult(
         payload=ServiceIdentity.model_validate(identity).model_dump(mode="json"),
@@ -229,6 +378,10 @@ def run_resolver_agent(
         requested_model=requested_model,
         resolved_model=resolved_model,
         model_error=model_error,
+        artifact_state=artifact_state.model_dump(mode="json"),
+        resolved_aliases=[item.model_dump(mode="json") for item in resolved_aliases],
+        blocked_tools=blocked_tool_entries(mcp_tools or [], artifact_state),
+        invocable_tools=invocable_tool_names(mcp_tools or [], artifact_state),
     )
 
 
@@ -240,9 +393,17 @@ def run_planner_agent(
     prompt_profile: AgentPromptProfile,
     mcp_servers: list[McpServerConfig] | None = None,
     mcp_tools: list[McpToolDescriptor] | None = None,
+    service_identity: dict[str, Any] | None = None,
+    artifact_state_payload: dict[str, Any] | None = None,
 ) -> AgentExecutionResult:
     alert = AlertEnvelope.model_validate(alert_payload)
-    context = derive_argument_context(alert_payload, {})
+    artifact_state = (
+        ArtifactState.model_validate(artifact_state_payload)
+        if isinstance(artifact_state_payload, dict)
+        else seed_artifact_state(alert_payload, service_identity or {})
+    )
+    artifact_state, resolved_aliases = resolve_service_aliases(artifact_state)
+    context = derive_argument_context(alert_payload, service_identity or {}, artifact_state)
     servers = _server_map(mcp_servers)
     tools = mcp_tools or []
     requested_model = {"primary": model_route.primary, "fallback": model_route.fallback}
@@ -254,12 +415,18 @@ def run_planner_agent(
         max_tools=max(1, min(prompt_profile.max_tool_calls, 4)),
         mode="discovery",
         light_probe_only=True,
+        artifact_state=artifact_state,
+        alert_payload=alert_payload,
     )
 
     traces: list[AgentToolTrace] = []
     for planned_tool in probe_tools:
-        _, trace = _execute_mcp_tool(servers, planned_tool.descriptor, planned_tool.arguments)
+        result, trace = _execute_mcp_tool(servers, planned_tool.descriptor, planned_tool.arguments)
         traces.append(trace)
+        artifact_state = merge_artifact_state(artifact_state, extract_artifact_update(planned_tool.descriptor, result))
+
+    artifact_state, resolved_aliases = resolve_service_aliases(artifact_state)
+    context = derive_argument_context(alert_payload, service_identity or {}, artifact_state)
 
     plan, plan_skipped = build_mcp_only_plan(
         investigation_id=investigation_id,
@@ -269,6 +436,8 @@ def run_planner_agent(
         max_steps=max(1, min(prompt_profile.max_tool_calls, 6)),
         max_api_calls=10,
         max_stage_wall_clock_seconds=600,
+        artifact_state=artifact_state,
+        alert_payload=alert_payload,
     )
     enforce_budget_policy(plan)
     validated_plan = InvestigationPlan.model_validate(plan.model_dump(mode="json"))
@@ -286,7 +455,8 @@ def run_planner_agent(
     skipped_tools = _dedupe_skipped_tools(probe_skipped + plan_skipped)
     reasoning = (
         f"Model {model_used} planned {len(validated_plan.ordered_steps)} MCP evidence step(s) after "
-        f"{len(traces)} light probe(s); skipped {len(skipped_tools)} tool(s) due to missing required arguments."
+        f"{len(traces)} light probe(s); skipped {len(skipped_tools)} tool(s); "
+        f"resolved_service={artifact_state.resolved_service or 'unknown'}."
     )
 
     return AgentExecutionResult(
@@ -299,6 +469,10 @@ def run_planner_agent(
         requested_model=requested_model,
         resolved_model=resolved_model,
         model_error=model_error,
+        artifact_state=artifact_state.model_dump(mode="json"),
+        resolved_aliases=[item.model_dump(mode="json") for item in resolved_aliases],
+        blocked_tools=blocked_tool_entries(tools, artifact_state),
+        invocable_tools=invocable_tool_names(tools, artifact_state),
     )
 
 

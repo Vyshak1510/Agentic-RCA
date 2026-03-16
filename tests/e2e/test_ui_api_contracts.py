@@ -309,6 +309,115 @@ def test_settings_mcp_prompt_rollout_and_layout_apis() -> None:
     assert prompt_list.status_code == 200
     assert prompt_list.json()["items"]
 
+    team_payload = {
+        "tenant": "default",
+        "environment": "prod",
+        "enabled": True,
+        "objective_prompt": "Investigate application-level failures using traces and logs.",
+        "tool_allowlist": ["mcp.jaeger.*"],
+        "max_tool_calls": 6,
+        "max_parallel_calls": 3,
+        "timeout_seconds": 30,
+    }
+    team_upsert = client.put("/v1/settings/investigation-teams/app", json=team_payload, headers=admin_headers)
+    assert team_upsert.status_code == 200
+    assert team_upsert.json()["team_id"] == "app"
+
+    team_list = client.get("/v1/settings/investigation-teams?environment=prod", headers=user_headers)
+    assert team_list.status_code == 200
+    assert team_list.json()["items"]
+
+    stage_mission_get = client.get(
+        "/v1/settings/stage-missions/resolve_service_identity?environment=prod",
+        headers=user_headers,
+    )
+    assert stage_mission_get.status_code == 200
+    assert stage_mission_get.json()["stage_id"] == "resolve_service_identity"
+
+    stage_mission_upsert = client.put(
+        "/v1/settings/stage-missions/resolve_service_identity",
+        json={
+            "tenant": "default",
+            "environment": "prod",
+            "mission_objective": "Resolve service identity with explicit ambiguity handling.",
+            "required_checks": ["alert_entities_reviewed", "canonical_service_selected"],
+            "allowed_tools": ["mcp.jaeger.*", "mcp.grafana.*"],
+            "completion_criteria": ["confidence_reported"],
+            "unknown_not_available_rules": ["missing_entity_context"],
+            "relevance_weights": {"alert": 1.0, "context_pack": 0.6},
+        },
+        headers=admin_headers,
+    )
+    assert stage_mission_upsert.status_code == 200
+
+    team_mission_get = client.get("/v1/settings/team-missions/app?environment=prod", headers=user_headers)
+    assert team_mission_get.status_code == 200
+    assert team_mission_get.json()["team_id"] == "app"
+
+    team_mission_upsert = client.put(
+        "/v1/settings/team-missions/app",
+        json={
+            "tenant": "default",
+            "environment": "prod",
+            "mission_objective": "Application mission policy",
+            "required_checks": ["trace_errors_checked"],
+            "allowed_tools": ["mcp.jaeger.*"],
+            "completion_criteria": ["mini_rca_produced"],
+            "unknown_not_available_rules": ["no_trace_evidence"],
+            "relevance_weights": {"service_scoped": 1.0, "global": 0.4},
+        },
+        headers=admin_headers,
+    )
+    assert team_mission_upsert.status_code == 200
+
+    context_pack_create = client.post(
+        "/v1/settings/context-packs",
+        json={
+            "tenant": "default",
+            "environment": "prod",
+            "pack_id": "otel-demo",
+            "name": "OTel Demo Context",
+            "description": "context for recommendation incident",
+            "stage_bindings": ["resolve_service_identity", "collect_evidence"],
+            "team_bindings": ["app", "infra"],
+            "service_tags": ["recommendationservice"],
+            "infra_components": ["redis", "kubernetes"],
+            "dependencies": ["frontend", "checkout"],
+        },
+        headers=admin_headers,
+    )
+    assert context_pack_create.status_code == 200
+    assert context_pack_create.json()["pack_id"] == "otel-demo"
+
+    context_artifact_upload = client.post(
+        "/v1/settings/context-packs/otel-demo/artifacts",
+        json={
+            "tenant": "default",
+            "environment": "prod",
+            "filename": "runbook.md",
+            "artifact_type": "markdown",
+            "content": "# Recommendation\nInvestigate recommendationservice latency and cache.",
+            "operator_notes": "updated today",
+            "metadata": {"source": "ops"},
+        },
+        headers=admin_headers,
+    )
+    assert context_artifact_upload.status_code == 200
+    assert context_artifact_upload.json()["version"] >= 2
+
+    context_activate = client.post(
+        "/v1/settings/context-packs/otel-demo/activate",
+        json={"tenant": "default", "environment": "prod"},
+        headers=admin_headers,
+    )
+    assert context_activate.status_code == 200
+    assert context_activate.json()["active"] is True
+
+    context_list = client.get("/v1/settings/context-packs?environment=prod", headers=user_headers)
+    assert context_list.status_code == 200
+    assert context_list.json()["items"]
+    assert context_list.json()["active"]["pack_id"] == "otel-demo"
+
     rollout_upsert = client.put(
         "/v1/settings/agent-rollout",
         json={"tenant": "default", "environment": "prod", "mode": "compare"},

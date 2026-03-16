@@ -1,12 +1,16 @@
 import {
   AgentPromptProfile,
   AgentRolloutConfig,
+  ContextPack,
+  InvestigationTeamProfile,
   ConnectorCredentialView,
   InvestigationListResponse,
   InvestigationRecord,
   LlmRoute,
   McpServerConfig,
   McpToolDescriptor,
+  StageMissionProfile,
+  TeamMissionProfile,
   UserContext,
   WorkflowLayoutState,
   WorkflowLayoutNode,
@@ -212,6 +216,135 @@ export async function upsertAgentRollout(payload: {
   return request<AgentRolloutConfig>("/v1/settings/agent-rollout", {
     method: "PUT",
     body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchInvestigationTeams(environment = "prod"): Promise<InvestigationTeamProfile[]> {
+  const payload = await request<{ items: InvestigationTeamProfile[] }>(`/v1/settings/investigation-teams?environment=${environment}`);
+  return payload.items;
+}
+
+export async function upsertInvestigationTeam(
+  teamId: string,
+  payload: {
+    tenant: string;
+    environment: string;
+    enabled: boolean;
+    objective_prompt: string;
+    tool_allowlist: string[];
+    max_tool_calls: number;
+    max_parallel_calls: number;
+    timeout_seconds: number;
+  }
+): Promise<InvestigationTeamProfile> {
+  return request<InvestigationTeamProfile>(`/v1/settings/investigation-teams/${teamId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchStageMission(stageId: WorkflowStageId, environment = "prod"): Promise<StageMissionProfile> {
+  return request<StageMissionProfile>(`/v1/settings/stage-missions/${stageId}?environment=${environment}`);
+}
+
+export async function upsertStageMission(
+  stageId: WorkflowStageId,
+  payload: {
+    tenant: string;
+    environment: string;
+    mission_objective: string;
+    required_checks: string[];
+    allowed_tools: string[];
+    completion_criteria: string[];
+    unknown_not_available_rules: string[];
+    relevance_weights: Record<string, number>;
+  }
+): Promise<StageMissionProfile> {
+  return request<StageMissionProfile>(`/v1/settings/stage-missions/${stageId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchTeamMission(teamId: string, environment = "prod"): Promise<TeamMissionProfile> {
+  return request<TeamMissionProfile>(`/v1/settings/team-missions/${teamId}?environment=${environment}`);
+}
+
+export async function upsertTeamMission(
+  teamId: string,
+  payload: {
+    tenant: string;
+    environment: string;
+    mission_objective: string;
+    required_checks: string[];
+    allowed_tools: string[];
+    completion_criteria: string[];
+    unknown_not_available_rules: string[];
+    relevance_weights: Record<string, number>;
+  }
+): Promise<TeamMissionProfile> {
+  return request<TeamMissionProfile>(`/v1/settings/team-missions/${teamId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchContextPacks(
+  environment = "prod"
+): Promise<{ items: ContextPack[]; active: ContextPack | null }> {
+  return request<{ items: ContextPack[]; active: ContextPack | null }>(`/v1/settings/context-packs?environment=${environment}`);
+}
+
+export async function createContextPack(payload: {
+  tenant: string;
+  environment: string;
+  pack_id: string;
+  name: string;
+  description?: string | null;
+  stage_bindings?: WorkflowStageId[];
+  team_bindings?: string[];
+  service_tags?: string[];
+  infra_components?: string[];
+  dependencies?: string[];
+  validity_start?: string | null;
+  validity_end?: string | null;
+}): Promise<ContextPack> {
+  return request<ContextPack>("/v1/settings/context-packs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function uploadContextArtifact(
+  packId: string,
+  payload: {
+    tenant: string;
+    environment: string;
+    filename: string;
+    artifact_type: string;
+    media_type?: string | null;
+    content: string;
+    operator_notes?: string | null;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<ContextPack> {
+  return request<ContextPack>(`/v1/settings/context-packs/${packId}/artifacts`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function activateContextPack(
+  packId: string,
+  payload: {
+    tenant: string;
+    environment: string;
+    version?: number;
+  }
+): Promise<ContextPack> {
+  return request<ContextPack>(`/v1/settings/context-packs/${packId}/activate`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 

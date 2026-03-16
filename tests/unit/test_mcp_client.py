@@ -159,6 +159,55 @@ def test_discover_tools_falls_back_to_legacy_endpoint(monkeypatch) -> None:
     assert [tool.tool_name for tool in tools] == ["legacy_tool"]
 
 
+def test_discover_tools_retries_with_mcp_suffix_when_base_url_root(monkeypatch) -> None:
+    config = _config().model_copy(update={"base_url": "https://mcp.example.com"})
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(status_code=404, json={"detail": "not found"})
+
+        if request.url.path != "/mcp" or request.method != "POST":
+            return httpx.Response(status_code=404, json={"detail": "not found"})
+
+        payload = json.loads(request.content.decode() or "{}")
+        method = payload.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                status_code=200,
+                headers={"Mcp-Session-Id": "session-4"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}},
+                },
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(status_code=202, text="")
+        if method == "tools/list":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"tools": [{"name": "search_dashboards"}]},
+                },
+            )
+        return httpx.Response(status_code=404, json={"detail": "unknown method"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "platform_core.mcp_client._build_client",
+        lambda timeout: httpx.Client(transport=transport, timeout=timeout),
+    )
+
+    tools = discover_mcp_tools(config)
+    assert [tool.tool_name for tool in tools] == ["search_dashboards"]
+    assert "/" in calls
+    assert "/mcp" in calls
+
+
 def test_discover_tools_infers_read_only_and_light_probe(monkeypatch) -> None:
     config = _config()
 

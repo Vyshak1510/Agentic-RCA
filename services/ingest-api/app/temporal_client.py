@@ -23,6 +23,10 @@ async def start_investigation_workflow(
     agent_rollout_mode: str = "compare",
     mcp_servers: list[dict] | None = None,
     mcp_tools: list[dict] | None = None,
+    investigation_teams: list[dict] | None = None,
+    stage_missions: dict | None = None,
+    team_missions: dict | None = None,
+    active_context_pack: dict | None = None,
     execution_policy: str = "mcp_only",
 ) -> tuple[str | None, str | None]:
     if getenv("TEMPORAL_AUTOSTART_ENABLED", "true").lower() in {"0", "false", "no"}:
@@ -54,6 +58,10 @@ async def start_investigation_workflow(
             agent_rollout_mode=agent_rollout_mode,
             mcp_servers=mcp_servers or [],
             mcp_tools=mcp_tools or [],
+            investigation_teams=investigation_teams or [],
+            stage_missions=stage_missions or {},
+            team_missions=team_missions or {},
+            active_context_pack=active_context_pack or {},
             execution_policy=execution_policy,
         )
 

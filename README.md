@@ -34,6 +34,24 @@ Cloud-agnostic, Kubernetes-first, Apache-2.0 open-source platform for alert-driv
   - mapper layout persistence per tenant+user+workflow key,
   - settings pages for connectors, LLM routes, MCP, prompts, rollout.
 
+## Current State And Learnings
+
+- The workflow now resolves telemetry aliases anchor-first and stays scoped to the alerted service more reliably.
+- Investigation runs expose stage reasoning, sanitized tool traces, artifact blackboards, rerun directives, and team mission outcomes in the inspector.
+- MCP-only execution is in place across resolver, planner, and evidence collection, with Jaeger, Grafana, and Prometheus MCP support for local testing.
+- The largest remaining quality gap is not resolver scope anymore; it is evidence execution depth.
+  - planner can emit service-correct Jaeger and Prometheus steps,
+  - but evidence collection still needs to follow those planned steps more strictly,
+  - especially for infra metric validation.
+- A fuller write-up is in `/Users/vyshak.r/Documents/Agentic-RCA/docs/agentic-rca-learnings.md`.
+
+Current known gaps:
+
+- Infra RCA still degrades to `unknown_not_available` when Prometheus-backed proof is missing.
+- App evidence collection still repeats shallow Jaeger probes in some reruns instead of drilling into trace details.
+- Final synthesis still needs stricter abstention/confidence behavior when required evidence classes are missing.
+- Some runs still return fewer than the required top-3 hypotheses.
+
 ## Tech Stack
 
 - Runtime: Python
@@ -82,6 +100,12 @@ Or via `make`:
 make compose-up
 ```
 
+Check container health and status:
+
+```bash
+make compose-ps
+```
+
 Stop the stack:
 
 ```bash
@@ -94,11 +118,22 @@ Tail logs:
 make compose-logs
 ```
 
+Restart only the web UI after frontend-only changes:
+
+```bash
+make compose-restart-web
+```
+
 Service URLs:
 
 - Web UI: `http://localhost:3001`
 - Ingest API: `http://localhost:8000`
-- Temporal UI: `http://localhost:8080`
+- Temporal UI: `http://localhost:8088` (or `${TEMPORAL_UI_PORT}`)
+
+Notes:
+
+- `ingest-api` and `web-ui` now publish container health checks, and the worker/UI wait for the API to become healthy before starting.
+- The `web-ui` container only runs `npm ci` when `services/web-ui/package-lock.json` changes, which avoids a full dependency install on every restart while keeping local Docker in sync with frontend dependency updates.
 
 ### 1) Install dependencies
 
@@ -139,7 +174,7 @@ npm run dev -- --port 3001
 ### 4) Open local UIs
 
 - Web UI: `http://localhost:3001`
-- Temporal UI: `http://localhost:8080`
+- Temporal UI: `http://localhost:8088` (or `${TEMPORAL_UI_PORT}`)
 - Ingest health: `http://localhost:8000/v1/health`
 
 ### 5) Seed demo incidents
@@ -212,6 +247,8 @@ Backend:
 - `TEMPORAL_AUTOSTART_ENABLED` (default `true`)
 - `TEMPORAL_ADDRESS` (default `localhost:7233`)
 - `TEMPORAL_TASK_QUEUE` (default `rca-investigations`)
+- `TEMPORAL_UI_PORT` (docker-compose host port for Temporal UI, default `8088`)
+- `TEMPORAL_UI_CORS_ORIGINS` (default `http://localhost:8088`)
 - `ORCHESTRATOR_EVENT_BASE_URL` (default `http://localhost:8000`)
 - `ORCHESTRATOR_EVENT_TOKEN` (optional)
 - `API_KEY` (optional; if set, required by API)
@@ -285,8 +322,22 @@ Notes:
 3. Click **Test** and **Load Tools**.
 4. Optional: start both local MCP sidecars together:
    - `make compose-up-all-mcp`
-5. Re-register both MCP servers in ingest settings after backend restart:
+5. Re-register all local MCP servers in ingest settings after backend restart:
    - `make bootstrap-local-mcp`
+
+## Prometheus MCP Setup (Metric Access for Infra Team)
+
+1. Start local Prometheus MCP sidecar:
+   - `docker compose -f docker-compose.local.yml -f docker-compose.prometheus-mcp.local.yml up -d --build prometheus-mcp`
+   - or `make compose-up-prometheus-mcp`
+2. Register in **Settings -> MCP Server Registry**:
+   - `server_id`: `prometheus`
+   - `base_url`: `http://prometheus-mcp:8000/mcp`
+   - `secret_ref_key`: leave blank for local sidecar unless your Prometheus endpoint is protected
+3. Click **Test** and **Load Tools**.
+4. The infra team now uses:
+   - Grafana MCP for dashboards/annotations/alert metadata
+   - Prometheus MCP for label discovery and metric queries
 
 ## Testing
 

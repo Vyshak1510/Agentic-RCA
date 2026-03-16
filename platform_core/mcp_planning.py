@@ -1,34 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import os
 from typing import Any
 
-from platform_core.models import AlertEnvelope, InvestigationPlan, McpToolDescriptor, PlanStep
-
-_DISCOVERY_PRIORITY: dict[tuple[str, str], int] = {
-    ("grafana", "get_annotations"): 0,
-    ("grafana", "get_annotation_tags"): 1,
-    ("grafana", "search_dashboards"): 2,
-    ("grafana", "list_datasources"): 3,
-    ("jaeger", "service_operations"): 4,
-    ("jaeger", "search_traces"): 5,
-    ("jaeger", "find_error_traces"): 6,
-}
-
-_EVIDENCE_PRIORITY: dict[tuple[str, str], int] = {
-    ("jaeger", "find_error_traces"): 0,
-    ("jaeger", "search_traces"): 1,
-    ("jaeger", "service_operations"): 2,
-    ("grafana", "get_annotations"): 3,
-    ("grafana", "get_annotation_tags"): 4,
-    ("grafana", "search_dashboards"): 5,
-    ("grafana", "list_datasources"): 6,
-}
+from platform_core.mcp_execution import (
+    bind_artifact_arguments,
+    resolve_service_aliases,
+    seed_artifact_state,
+    tool_diagnostics,
+)
+from platform_core.models import (
+    AlertEnvelope,
+    ArtifactState,
+    InvestigationPlan,
+    McpExecutionPhase,
+    McpScopeKind,
+    McpToolDescriptor,
+    PlanStep,
+)
 
 _ARG_ALIAS_CANDIDATES: dict[str, list[str]] = {
     "service": ["service", "service_name", "serviceName", "canonical_service_id", "entity_id", "entity"],
     "service_name": ["service", "service_name", "serviceName", "canonical_service_id", "entity_id", "entity"],
     "serviceName": ["service", "service_name", "serviceName", "canonical_service_id", "entity_id", "entity"],
+    "tags": ["tags", "tag", "service", "service_name", "serviceName", "canonical_service_id", "entity_id", "entity"],
+    "tag": ["tag", "tags", "service", "service_name", "serviceName", "canonical_service_id", "entity_id", "entity"],
     "uid": ["uid", "alert_uid", "alertRuleUid", "alert_rule_uid"],
     "alertgroupid": ["alertGroupId", "alert_group_id", "group_id", "groupKey", "group_key"],
     "alertGroupId": ["alertGroupId", "alert_group_id", "group_id", "groupKey", "group_key"],
@@ -42,6 +40,7 @@ _ARG_ALIAS_CANDIDATES: dict[str, list[str]] = {
 class PlannedMcpTool:
     descriptor: McpToolDescriptor
     arguments: dict[str, Any]
+    artifact_state: ArtifactState | None = None
 
 
 def _norm(value: str) -> str:
@@ -102,6 +101,7 @@ def _extract_scalar_values(payload: Any, *, depth: int = 0, max_depth: int = 5) 
 def derive_argument_context(
     alert_payload: dict[str, Any],
     service_identity: dict[str, Any] | None = None,
+    artifact_state: ArtifactState | None = None,
 ) -> dict[str, Any]:
     alert = AlertEnvelope.model_validate(alert_payload)
     context: dict[str, Any] = {
@@ -118,8 +118,10 @@ def derive_argument_context(
     canonical_service_id = ""
     if isinstance(service_identity, dict):
         canonical_service_id = str(service_identity.get("canonical_service_id") or "").strip()
-    if not canonical_service_id and alert.entity_ids:
-        canonical_service_id = str(alert.entity_ids[0]).strip()
+
+    resolved_service = artifact_state.resolved_service if artifact_state else None
+    if resolved_service:
+        canonical_service_id = resolved_service
 
     if canonical_service_id:
         context["service"] = canonical_service_id
@@ -148,7 +150,88 @@ def derive_argument_context(
     return context
 
 
+def _artifact_state_from_context(context: dict[str, Any]) -> ArtifactState:
+    state = ArtifactState(
+        alert_terms=[str(value) for value in context.get("entity_ids", []) if isinstance(value, str)],
+        resolved_service=(str(context.get("canonical_service_id") or "").strip() or None),
+    )
+    if state.resolved_service:
+        state.service_candidates = [state.resolved_service]
+    return state
+
+
 def derive_tool_arguments(tool: McpToolDescriptor, context: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    server = tool.server_id.strip().lower()
+
+    def maybe_coerce(arg: str, value: Any) -> Any:
+        normalized = _norm(arg)
+
+        if normalized == "tag":
+            if isinstance(value, str):
+                text = value.strip()
+                return text or None
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+                return None
+            return value
+
+        if normalized == "tags":
+            # Jaeger tags are not plain service-name strings; passing those
+            # triggers 400s. Keep only structurally valid tag payloads.
+            if server == "jaeger":
+                if isinstance(value, dict):
+                    sanitized: dict[str, str] = {}
+                    for key, item in value.items():
+                        key_text = str(key).strip()
+                        if not key_text:
+                            continue
+                        if isinstance(item, (str, int, float, bool)):
+                            item_text = str(item).strip()
+                            if item_text:
+                                sanitized[key_text] = item_text
+                    return sanitized or None
+                if isinstance(value, str):
+                    text = value.strip()
+                    if not text:
+                        return None
+                    if text.startswith("{") and text.endswith("}"):
+                        return text
+                    if "=" in text:
+                        return text
+                    return None
+                if isinstance(value, list):
+                    pairs = [item.strip() for item in value if isinstance(item, str) and "=" in item]
+                    if not pairs:
+                        return None
+                    return ",".join(pairs)
+                return None
+
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, str) and item]
+            return value
+
+        if normalized not in {"from", "to"}:
+            return value
+
+        # Grafana annotation APIs expect integer timestamps (epoch millis).
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return value
+            if text.isdigit():
+                return int(text)
+            iso_candidate = text.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(iso_candidate)
+            except ValueError:
+                return value
+            return int(dt.timestamp() * 1000)
+        return value
+
     def lookup(arg: str) -> Any:
         candidates = _ARG_ALIAS_CANDIDATES.get(arg, [])
         normalized = _norm(arg)
@@ -156,10 +239,16 @@ def derive_tool_arguments(tool: McpToolDescriptor, context: dict[str, Any]) -> t
         candidates.extend([arg, normalized])
         for candidate in candidates:
             if candidate in context and context[candidate] not in (None, ""):
-                return context[candidate]
+                coerced = maybe_coerce(arg, context[candidate])
+                if coerced is None:
+                    continue
+                return coerced
             canonical = _norm(candidate)
             if canonical in context and context[canonical] not in (None, ""):
-                return context[canonical]
+                coerced = maybe_coerce(arg, context[canonical])
+                if coerced is None:
+                    continue
+                return coerced
         return None
 
     args: dict[str, Any] = {}
@@ -183,19 +272,50 @@ def derive_tool_arguments(tool: McpToolDescriptor, context: dict[str, Any]) -> t
     return args, missing
 
 
-def _tool_priority(tool: McpToolDescriptor, mode: str) -> tuple[int, int, int, str, str]:
-    if mode == "evidence":
-        priority = _EVIDENCE_PRIORITY.get((tool.server_id, tool.tool_name), 100)
-    else:
-        priority = _DISCOVERY_PRIORITY.get((tool.server_id, tool.tool_name), 100)
-    # Prefer tools with fewer required args in discovery for higher invocation reliability.
+def _tool_priority(
+    tool: McpToolDescriptor,
+    mode: str,
+    artifact_state: ArtifactState | None = None,
+) -> tuple[int, int, int, int, str, str]:
+    phase_weight = {
+        McpExecutionPhase.DISCOVER: 0,
+        McpExecutionPhase.RESOLVE: 1,
+        McpExecutionPhase.INSPECT: 2,
+        McpExecutionPhase.DRILLDOWN: 3,
+    }.get(tool.phase, 9)
+    if mode == "discovery":
+        phase_weight = 0 if tool.phase in {McpExecutionPhase.DISCOVER, McpExecutionPhase.RESOLVE} else 9
+    elif (
+        mode == "evidence"
+        and artifact_state is not None
+        and artifact_state.resolved_service
+        and tool.phase == McpExecutionPhase.INSPECT
+        and tool.scope_kind in {McpScopeKind.SERVICE, McpScopeKind.METRIC}
+    ):
+        # Once service identity is resolved, prioritize service-scoped inspect
+        # tools so the plan always includes actionable evidence steps.
+        phase_weight = -1
+    # Prefer lower declared priority and fewer required args.
     return (
-        priority,
+        phase_weight,
+        int(tool.default_priority),
         len(tool.required_args),
         0 if tool.light_probe else 1,
         tool.server_id,
         tool.tool_name,
     )
+
+
+def _tool_disabled_by_policy(tool: McpToolDescriptor) -> bool:
+    # Grafana OnCall/alert-group tools are environment-dependent and frequently
+    # fail in local setups without the OnCall service configured. Keep them off
+    # by default for RCA workflows; allow explicit opt-in via env flag.
+    if tool.server_id != "grafana":
+        return False
+    if os.getenv("RCA_GRAFANA_ENABLE_ONCALL_TOOLS", "").strip() == "1":
+        return False
+    lowered = tool.tool_name.lower()
+    return "oncall" in lowered or "alert_group" in lowered
 
 
 def select_mcp_tools(
@@ -206,18 +326,48 @@ def select_mcp_tools(
     max_tools: int,
     mode: str,
     light_probe_only: bool = False,
+    artifact_state: ArtifactState | None = None,
+    alert_payload: dict[str, Any] | None = None,
 ) -> tuple[list[PlannedMcpTool], list[dict[str, Any]]]:
     filtered = filter_tools_by_allowlist(tools, allowlist)
     filtered = [tool for tool in filtered if tool.read_only]
     if light_probe_only:
         filtered = [tool for tool in filtered if tool.light_probe]
+    if mode == "discovery":
+        filtered = [tool for tool in filtered if tool.phase in {McpExecutionPhase.DISCOVER, McpExecutionPhase.RESOLVE}]
+
+    artifact_state = artifact_state or _artifact_state_from_context(context)
 
     selected: list[PlannedMcpTool] = []
     skipped: list[dict[str, Any]] = []
 
-    for tool in sorted(filtered, key=lambda item: _tool_priority(item, mode)):
-        args, missing = derive_tool_arguments(tool, context)
+    for tool in sorted(filtered, key=lambda item: _tool_priority(item, mode, artifact_state)):
         fqdn = f"mcp.{tool.server_id}.{tool.tool_name}"
+        if _tool_disabled_by_policy(tool):
+            skipped.append(
+                {
+                    "tool_name": fqdn,
+                    "reason": "disabled_by_policy",
+                    "detail": "Tool disabled by default RCA policy.",
+                }
+            )
+            continue
+
+        diagnostics = tool_diagnostics(tool, artifact_state)
+        if not diagnostics.invocable:
+            skipped.append(
+                {
+                    "tool_name": fqdn,
+                    "reason": "missing_artifacts",
+                    "missing_artifacts": diagnostics.missing_artifacts,
+                }
+            )
+            continue
+
+        args, missing = derive_tool_arguments(tool, context)
+        if alert_payload is not None:
+            args = bind_artifact_arguments(tool, args, artifact_state, alert_payload)
+        missing = [required for required in tool.required_args if args.get(required) in (None, "")]
         if missing:
             skipped.append(
                 {
@@ -229,7 +379,20 @@ def select_mcp_tools(
             )
             continue
 
-        selected.append(PlannedMcpTool(descriptor=tool, arguments=args))
+        # Some MCP tools expose optional schema fields but still require
+        # at least one identifier in practice (for example get_datasource).
+        # Avoid invoking such tools with empty arguments.
+        if tool.tool_name.startswith("get_") and tool.arg_keys and not args:
+            skipped.append(
+                {
+                    "tool_name": fqdn,
+                    "reason": "missing_context_args",
+                    "expected_any_of": tool.arg_keys,
+                }
+            )
+            continue
+
+        selected.append(PlannedMcpTool(descriptor=tool, arguments=args, artifact_state=artifact_state.model_copy(deep=True)))
         if len(selected) >= max_tools:
             break
 
@@ -245,7 +408,11 @@ def build_mcp_only_plan(
     max_steps: int,
     max_api_calls: int,
     max_stage_wall_clock_seconds: int,
+    artifact_state: ArtifactState | None = None,
+    alert_payload: dict[str, Any] | None = None,
 ) -> tuple[InvestigationPlan, list[dict[str, Any]]]:
+    artifact_state = artifact_state or _artifact_state_from_context(context)
+    artifact_state, _ = resolve_service_aliases(artifact_state)
     selected, skipped = select_mcp_tools(
         tools,
         context,
@@ -253,6 +420,8 @@ def build_mcp_only_plan(
         max_tools=max_steps,
         mode="evidence",
         light_probe_only=False,
+        artifact_state=artifact_state,
+        alert_payload=alert_payload,
     )
     if not selected:
         selected, discovery_skipped = select_mcp_tools(
@@ -262,15 +431,27 @@ def build_mcp_only_plan(
             max_tools=max_steps,
             mode="discovery",
             light_probe_only=True,
+            artifact_state=artifact_state,
+            alert_payload=alert_payload,
         )
         skipped.extend(discovery_skipped)
 
     steps: list[PlanStep] = []
+    budget_used = 0
     for item in selected:
         tool = item.descriptor
         timeout_seconds = 90 if tool.light_probe else 150
         budget_weight = 1 if tool.light_probe else 2
         capability = f"{tool.server_id}.{tool.tool_name}"
+        if steps and budget_used + timeout_seconds > max_stage_wall_clock_seconds:
+            skipped.append(
+                {
+                    "tool_name": f"mcp.{tool.server_id}.{tool.tool_name}",
+                    "reason": "budget_trimmed",
+                    "detail": "Skipped to keep the plan within the stage wall-clock budget.",
+                }
+            )
+            continue
 
         steps.append(
             PlanStep(
@@ -283,8 +464,11 @@ def build_mcp_only_plan(
                 mcp_server_id=tool.server_id,
                 mcp_tool_name=tool.tool_name,
                 mcp_arguments=item.arguments,
+                required_artifacts=tool.requires_artifacts,
+                produced_artifacts=tool.produces_artifacts,
             )
         )
+        budget_used += timeout_seconds
 
     plan = InvestigationPlan(
         investigation_id=investigation_id,

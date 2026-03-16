@@ -1,0 +1,13 @@
+services:
+  prometheus-mcp:
+    build:
+      context: .
+      dockerfile: third_party/prometheus-mcp/Dockerfile
+    container_name: prometheus-mcp
+    environment:
+      PROMETHEUS_BASE_URL: ${PROMETHEUS_MCP_TARGET_URL:-http://host.docker.internal:9090}
+      PROMETHEUS_TIMEOUT_SECONDS: ${PROMETHEUS_TIMEOUT_SECONDS:-10}
+    ports:
+      - "8003:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

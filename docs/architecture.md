@@ -15,9 +15,13 @@
 3. Planner stage supports compare/active rollout:
    - Compare mode: deterministic planner remains active while agentic planner runs in parallel and records diffs.
    - Active mode: agentic planner output is source of truth; stage failure fails run.
-4. Evidence collection executes MCP-only plan steps in v1 MCP mode (`mcp.grafana.*`, `mcp.jaeger.*`); non-MCP steps are rejected.
+4. Evidence collection runs parallel team agents (`app`, `infra`, `db`) with explicit MCP tool allowlists.
+   - Teams produce mini RCAs with citations, mission checklists, unknowns, and sanitized tool traces.
+   - Best-effort policy: teams with no matching tools are marked `skipped_no_tools`.
+   - Non-MCP plan steps are rejected in MCP-only mode.
 5. Evidence pipeline redacts + normalizes to citation-backed `EvidenceItem`.
-6. Analysis engine synthesizes top hypotheses with citation enforcement.
+6. Commander synthesis arbitrates team mini RCAs + evidence into final top-3 hypotheses with citation enforcement.
+   - Arbitration emits `arbitration_conflicts` and `arbitration_decision_trace`.
 7. Publisher posts outputs to Slack/Jira.
 8. Eval subsystem scores runs and enforces rollout gates.
 
@@ -25,6 +29,9 @@
 
 - Model routing uses tenant/environment LLM route settings (`primary_model` + `fallback_model`).
 - Stage prompts are configurable per stage (`resolve_service_identity`, `build_investigation_plan`).
+- Stage mission policies are configurable for all major stages (`resolver`, `planner`, `collect_evidence`, `synthesis`, `emit_eval_event`).
+- Team mission policies are configurable per team (`app`, `infra`, `db`) and enforce policy-as-data checks.
+- Context packs provide versioned runtime context (docs/runbooks/notes/diagram attachments) and are activated per tenant/environment.
 - Tool registry merges:
   - Built-in connector tools
   - MCP-discovered tools
@@ -32,13 +39,33 @@
 - Tool-call traces are stored as sanitized summaries (no secret values).
 - Tool selection is argument-aware: MCP tools with unmet required args are skipped and recorded as `skipped_tools`.
 - Resolver/planner run metadata includes `requested_model`, `resolved_model`, and `model_error`.
+- Collect/synthesis run metadata includes team execution summaries and commander arbitration trace.
+- All mission-enabled stages emit mission metadata:
+  - `mission_id`
+  - `mission_checklist`
+  - `context_refs`
+  - `unknown_not_available_reasons`
+  - `relevance_weights`
 
 ## MCP and Control Surfaces
 
 - MCP servers are managed via settings API and can be connection-tested.
 - MCP tool catalogs are fetched and cached per tenant/environment/server.
+- MCP descriptors are enriched with an internal execution profile: `phase`, `scope_kind`, `requires_artifacts`, `produces_artifacts`, `default_priority`, and `result_adapter`.
+- Resolver/planner/evidence execution all share an artifact blackboard (`resolved_service`, `trace_ids`, `dashboard_uids`, `metric_service_candidates`, etc.).
 - Agent rollout mode is configurable (`compare`, `active`).
+- Active context-pack version is hot-swappable and used on subsequent runs without code change.
 - Web mapper layout state is persisted per tenant+user+workflow key.
+
+## Telemetry Alias Resolution
+
+- Alert terms seed the artifact blackboard; they are not treated as telemetry IDs by default.
+- Discovery tools populate telemetry-native candidates first:
+  - Jaeger: `get_services`
+  - Grafana: metadata/discovery only
+  - Prometheus MCP: label discovery + metric query tools
+- Alias resolution maps alert/service names to telemetry-native identifiers before service-scoped queries run.
+- Service-scoped tools are blocked until `resolved_service` exists; trace-detail tools are blocked until `trace_ids` exist.
 
 ## Resolver Chain
 

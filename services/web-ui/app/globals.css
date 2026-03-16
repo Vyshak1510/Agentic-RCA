@@ -55,3 +55,64 @@ a {
 .react-flow__edge.animated .react-flow__edge-path {
   stroke-dasharray: 8 6;
 }
+
+.execution-mapper .react-flow__controls {
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.execution-mapper .react-flow__controls-button {
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: rgba(255, 255, 255, 0.92);
+  color: #475569;
+}
+
+.execution-mapper .react-flow__controls-button:hover {
+  background: #fff7ed;
+}
+
+.execution-mapper .react-flow__minimap-mask {
+  fill: rgba(255, 248, 240, 0.84);
+}
+
+.execution-mapper .react-flow__attribution {
+  display: none;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background: rgba(148, 163, 184, 0.28);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.42);
+  background-clip: content-box;
+}
+
+@keyframes mapperPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16), 0 18px 42px rgba(249, 115, 22, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.24), 0 24px 52px rgba(249, 115, 22, 0.16);
+  }
+}

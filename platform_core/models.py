@@ -40,6 +40,22 @@ class McpTransport(str, Enum):
     HTTP_SSE = "http_sse"
 
 
+class McpExecutionPhase(str, Enum):
+    DISCOVER = "discover"
+    RESOLVE = "resolve"
+    INSPECT = "inspect"
+    DRILLDOWN = "drilldown"
+
+
+class McpScopeKind(str, Enum):
+    GLOBAL = "global"
+    SERVICE = "service"
+    TRACE = "trace"
+    DATASOURCE = "datasource"
+    DASHBOARD = "dashboard"
+    METRIC = "metric"
+
+
 class AlertEnvelope(BaseModel):
     source: str
     severity: str
@@ -70,6 +86,8 @@ class PlanStep(BaseModel):
     mcp_server_id: str | None = None
     mcp_tool_name: str | None = None
     mcp_arguments: dict[str, Any] = Field(default_factory=dict)
+    required_artifacts: list[str] = Field(default_factory=list)
+    produced_artifacts: list[str] = Field(default_factory=list)
 
 
 class InvestigationPlan(BaseModel):
@@ -320,6 +338,355 @@ class McpToolDescriptor(BaseModel):
     light_probe: bool = False
     arg_keys: list[str] = Field(default_factory=list)
     required_args: list[str] = Field(default_factory=list)
+    phase: McpExecutionPhase = McpExecutionPhase.DISCOVER
+    scope_kind: McpScopeKind = McpScopeKind.GLOBAL
+    requires_artifacts: list[str] = Field(default_factory=list)
+    produces_artifacts: list[str] = Field(default_factory=list)
+    default_priority: int = Field(default=100, ge=0)
+    result_adapter: str | None = None
+
+
+class McpExecutionProfile(BaseModel):
+    server_id: str
+    tool_name: str
+    phase: McpExecutionPhase
+    scope_kind: McpScopeKind
+    requires_artifacts: list[str] = Field(default_factory=list)
+    produces_artifacts: list[str] = Field(default_factory=list)
+    default_priority: int = Field(default=100, ge=0)
+    result_adapter: str | None = None
+
+
+class ResolvedTelemetryAlias(BaseModel):
+    alert_term: str
+    resolved_value: str
+    source: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    candidates: list[str] = Field(default_factory=list)
+
+
+class AliasCandidateScore(BaseModel):
+    term: str
+    term_source: str
+    candidate: str
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class AliasDecisionTrace(BaseModel):
+    strategy: str = "anchor_priority"
+    selected_candidate: str | None = None
+    matched_term: str | None = None
+    matched_term_source: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    ambiguous_candidates: list[str] = Field(default_factory=list)
+    top_candidates: list[AliasCandidateScore] = Field(default_factory=list)
+    unresolved_reason: str | None = None
+
+
+class ArtifactState(BaseModel):
+    alert_terms: list[str] = Field(default_factory=list)
+    entity_terms: list[str] = Field(default_factory=list)
+    explicit_service_terms: list[str] = Field(default_factory=list)
+    title_terms: list[str] = Field(default_factory=list)
+    summary_terms: list[str] = Field(default_factory=list)
+    service_candidates: list[str] = Field(default_factory=list)
+    resolved_service: str | None = None
+    service_aliases: list[ResolvedTelemetryAlias] = Field(default_factory=list)
+    alias_decision_trace: AliasDecisionTrace | None = None
+    operation_candidates: list[str] = Field(default_factory=list)
+    resolved_operations: list[str] = Field(default_factory=list)
+    trace_ids: list[str] = Field(default_factory=list)
+    datasource_ids: list[str] = Field(default_factory=list)
+    dashboard_uids: list[str] = Field(default_factory=list)
+    annotation_tags: list[str] = Field(default_factory=list)
+    metric_label_keys: list[str] = Field(default_factory=list)
+    metric_service_candidates: list[str] = Field(default_factory=list)
+    trace_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    dependency_edges: list[str] = Field(default_factory=list)
+    root_cause_signals: list[str] = Field(default_factory=list)
+
+
+class ArtifactUpdate(BaseModel):
+    source_tool: str
+    service_candidates: list[str] = Field(default_factory=list)
+    operation_candidates: list[str] = Field(default_factory=list)
+    trace_ids: list[str] = Field(default_factory=list)
+    datasource_ids: list[str] = Field(default_factory=list)
+    dashboard_uids: list[str] = Field(default_factory=list)
+    annotation_tags: list[str] = Field(default_factory=list)
+    metric_label_keys: list[str] = Field(default_factory=list)
+    metric_service_candidates: list[str] = Field(default_factory=list)
+    trace_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    dependency_edges: list[str] = Field(default_factory=list)
+    root_cause_signals: list[str] = Field(default_factory=list)
+
+
+class InvestigationTeamProfile(BaseModel):
+    team_id: str
+    tenant: str = "default"
+    environment: str = "prod"
+    enabled: bool = True
+    objective_prompt: str
+    tool_allowlist: list[str] = Field(default_factory=list)
+    max_tool_calls: int = Field(default=6, ge=1, le=40)
+    max_parallel_calls: int = Field(default=3, ge=1, le=20)
+    timeout_seconds: int = Field(default=30, ge=1, le=180)
+    updated_at: datetime
+    updated_by: str
+
+
+class InvestigationTeamProfileUpsertRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    enabled: bool = True
+    objective_prompt: str
+    tool_allowlist: list[str] = Field(default_factory=list)
+    max_tool_calls: int = Field(default=6, ge=1, le=40)
+    max_parallel_calls: int = Field(default=3, ge=1, le=20)
+    timeout_seconds: int = Field(default=30, ge=1, le=180)
+
+
+class MissionChecklistResult(BaseModel):
+    mission_id: str
+    completed: list[str] = Field(default_factory=list)
+    failed: list[str] = Field(default_factory=list)
+    unavailable: list[str] = Field(default_factory=list)
+    passed: bool = False
+
+
+class RerunDirective(BaseModel):
+    target_stage: WorkflowStageId
+    reason: str
+    additional_objective: str
+    expected_evidence: str
+    tool_focus: list[str] = Field(default_factory=list)
+
+
+class RerunLedgerEntry(BaseModel):
+    sequence: int = Field(ge=1)
+    requested_by_stage: WorkflowStageId
+    target_stage: WorkflowStageId
+    reason: str
+    additional_objective: str
+    expected_evidence: str
+    tool_focus: list[str] = Field(default_factory=list)
+    accepted: bool = False
+    outcome: str = "pending"
+    requested_at: datetime
+    completed_at: datetime | None = None
+
+
+class EvidenceRequirement(BaseModel):
+    evidence_class: str
+    description: str
+    tool_patterns: list[str] = Field(default_factory=list)
+    query_scope: str = "any"
+    required_symptoms: list[str] = Field(default_factory=list)
+
+
+class StageEvalRecord(BaseModel):
+    stage_id: WorkflowStageId
+    record_id: str
+    status: str
+    summary: str
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    findings: list[str] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextReference(BaseModel):
+    context_citation_id: str
+    pack_id: str
+    pack_version: int = Field(ge=1)
+    artifact_id: str
+    chunk_id: str
+    stage_id: WorkflowStageId | None = None
+    team_id: str | None = None
+    summary: str
+    score: float = Field(default=0.0, ge=0.0)
+
+
+class StageMissionProfile(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    stage_id: WorkflowStageId
+    mission_objective: str
+    required_checks: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    completion_criteria: list[str] = Field(default_factory=list)
+    unknown_not_available_rules: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    alias_priority_order: list[str] = Field(default_factory=list)
+    alias_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    summary_tiebreak_only: bool = True
+    updated_at: datetime
+    updated_by: str
+
+
+class StageMissionProfileUpsertRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    mission_objective: str
+    required_checks: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    completion_criteria: list[str] = Field(default_factory=list)
+    unknown_not_available_rules: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    alias_priority_order: list[str] = Field(default_factory=list)
+    alias_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    summary_tiebreak_only: bool = True
+
+
+class TeamMissionProfile(BaseModel):
+    team_id: str
+    tenant: str = "default"
+    environment: str = "prod"
+    mission_objective: str
+    required_checks: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    completion_criteria: list[str] = Field(default_factory=list)
+    unknown_not_available_rules: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    evidence_requirements: list[EvidenceRequirement] = Field(default_factory=list)
+    symptom_overrides: dict[str, list[str]] = Field(default_factory=dict)
+    updated_at: datetime
+    updated_by: str
+
+
+class TeamMissionProfileUpsertRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    mission_objective: str
+    required_checks: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    completion_criteria: list[str] = Field(default_factory=list)
+    unknown_not_available_rules: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    evidence_requirements: list[EvidenceRequirement] = Field(default_factory=list)
+    symptom_overrides: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ContextChunk(BaseModel):
+    chunk_id: str
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextArtifact(BaseModel):
+    artifact_id: str
+    pack_id: str
+    filename: str
+    artifact_type: str
+    media_type: str | None = None
+    content: str = ""
+    operator_notes: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    parsed_chunks: list[ContextChunk] = Field(default_factory=list)
+    created_at: datetime
+    created_by: str
+
+
+class ContextPack(BaseModel):
+    pack_id: str
+    tenant: str = "default"
+    environment: str = "prod"
+    name: str
+    description: str | None = None
+    version: int = Field(default=1, ge=1)
+    status: str = "draft"
+    stage_bindings: list[WorkflowStageId] = Field(default_factory=list)
+    team_bindings: list[str] = Field(default_factory=list)
+    service_tags: list[str] = Field(default_factory=list)
+    infra_components: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    validity_start: datetime | None = None
+    validity_end: datetime | None = None
+    artifacts: list[ContextArtifact] = Field(default_factory=list)
+    active: bool = False
+    created_at: datetime
+    updated_at: datetime
+    updated_by: str
+
+
+class ContextPackCreateRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    pack_id: str
+    name: str
+    description: str | None = None
+    stage_bindings: list[WorkflowStageId] = Field(default_factory=list)
+    team_bindings: list[str] = Field(default_factory=list)
+    service_tags: list[str] = Field(default_factory=list)
+    infra_components: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    validity_start: datetime | None = None
+    validity_end: datetime | None = None
+
+
+class ContextArtifactUploadRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    filename: str
+    artifact_type: str
+    media_type: str | None = None
+    content: str = ""
+    operator_notes: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextPackActivateRequest(BaseModel):
+    tenant: str = "default"
+    environment: str = "prod"
+    version: int | None = Field(default=None, ge=1)
+
+
+class TeamRcaDraft(BaseModel):
+    team_id: str
+    status: str
+    summary: str
+    mission_id: str | None = None
+    mission_checklist: MissionChecklistResult | None = None
+    context_refs: list[ContextReference] = Field(default_factory=list)
+    unknown_not_available_reasons: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    completeness_status: str = "unknown_not_available"
+    hypotheses: list[Hypothesis] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    supporting_citations: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    tool_traces: list[AgentToolTrace] = Field(default_factory=list)
+    skipped_tools: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_state: ArtifactState | None = None
+    resolved_aliases: list[ResolvedTelemetryAlias] = Field(default_factory=list)
+    blocked_tools: list[dict[str, Any]] = Field(default_factory=list)
+    invocable_tools: list[str] = Field(default_factory=list)
+
+
+class TeamExecutionSummary(BaseModel):
+    team_id: str
+    status: str
+    mission_id: str | None = None
+    mission_checklist: MissionChecklistResult | None = None
+    context_refs: list[ContextReference] = Field(default_factory=list)
+    unknown_not_available_reasons: list[str] = Field(default_factory=list)
+    relevance_weights: dict[str, float] = Field(default_factory=dict)
+    selected_tools: list[str] = Field(default_factory=list)
+    executed_tool_count: int = 0
+    failed_tool_count: int = 0
+    evidence_count: int = 0
+    duration_ms: int = 0
+    citations: list[str] = Field(default_factory=list)
+    error: str | None = None
+    artifact_state: ArtifactState | None = None
+    resolved_aliases: list[ResolvedTelemetryAlias] = Field(default_factory=list)
+    blocked_tools: list[dict[str, Any]] = Field(default_factory=list)
+    invocable_tools: list[str] = Field(default_factory=list)
+
+
+class CommanderArbitrationSummary(BaseModel):
+    selected_team_ids: list[str] = Field(default_factory=list)
+    arbitration_conflicts: list[str] = Field(default_factory=list)
+    arbitration_decision_trace: str
 
 
 class AgentPromptProfile(BaseModel):
