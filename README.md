@@ -2,6 +2,45 @@
 
 Cloud-agnostic, Kubernetes-first, Apache-2.0 open-source platform for alert-driven root-cause analysis (RCA).
 
+> Reduced incident investigation from hours to minutes for enterprise customers. Presented at OpenAI Codex Dev Meetup, March 2026. Cloud-agnostic, Kubernetes-first, Apache-2.0.
+
+![RCA Incident Console](docs/assets/incident-console.png)
+
+## Key Features
+
+- 6-stage Temporal-orchestrated investigation pipeline for alert-to-RCA execution.
+- Multi-provider LLM routing with per-tenant primary/fallback model configuration.
+- Eval gating with golden datasets, adjudication, and compare-mode rollout control.
+- MCP-native tool discovery and execution across Grafana, Jaeger, Prometheus, and New Relic.
+- Python plugin SDK for custom connectors and capability-based routing.
+- Full web UI with incident console, workflow inspector, and interactive execution mapper.
+- Helm chart + CRDs for Kubernetes-first deployment and runtime configuration.
+
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  Alerts["Alert Ingest"] --> Resolve["resolve_service_identity"]
+
+  subgraph Temporal["Temporal Investigation Workflow"]
+    Resolve --> Plan["build_investigation_plan"]
+    Plan --> Evidence["collect_evidence"]
+    Evidence --> Synthesize["synthesize_rca_report"]
+    Synthesize --> Publish["publish_report"]
+    Publish --> Eval["emit_eval_event"]
+  end
+
+  LLM["LLM Routing<br/>primary / fallback"] --> Resolve
+  LLM --> Plan
+  LLM --> Evidence
+  LLM --> Synthesize
+
+  Grafana["MCP: Grafana"] --> Evidence
+  Jaeger["MCP: Jaeger"] --> Evidence
+  Prometheus["MCP: Prometheus"] --> Evidence
+  NewRelic["MCP: New Relic"] --> Evidence
+```
+
 ## Product Boundaries (v1)
 
 - RCA-only output (top-3 hypotheses + evidence + confidence), no autonomous remediation.
